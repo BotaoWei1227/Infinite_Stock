@@ -1,0 +1,9 @@
+{
+  "name": "alchemy-exchange",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "cd worker && node --test"
+  }
+}
