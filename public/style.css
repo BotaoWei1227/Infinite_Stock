@@ -1,0 +1,10 @@
+:root{--bg:#101820;--panel:#18242f;--line:#2a3a48;--tx:#e9eef2;--mu:#8da0ae;--up:#ff5a5f;--dn:#2fbf85;--ac:#f0b94a}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.5 "Noto Sans TC",system-ui,sans-serif;padding:12px;max-width:760px;margin:auto}
+h1{font-size:22px;margin:4px 0}.note{color:var(--mu);font-size:12px;border:1px dashed var(--line);padding:6px 8px;border-radius:6px}
+.bar,.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:10px;margin:10px 0}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.grow{flex:1}
+input,select,button{font:inherit;background:#0c131a;color:var(--tx);border:1px solid var(--line);border-radius:6px;padding:6px 8px;min-height:36px}
+button{cursor:pointer;background:var(--ac);color:#101820;border:0;font-weight:700}button.g{background:#22313e;color:var(--tx)}button:disabled{opacity:.4}
+button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--ac)}
+.p{font-size:26px;font-weight:700}.up{color:var(--up)}.dn{color:var(--dn)}.mu{color:var(--mu);font-size:13px}
+.ic{width:28px;height:28px;object-fit:contain;vertical-align:middle}#feed div{padding:3px 0;border-bottom:1px solid var(--line);font-size:13px}

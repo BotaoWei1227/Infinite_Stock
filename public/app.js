@@ -2,13 +2,12 @@ import {CFG} from "./config.js";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {getAuth,onAuthStateChanged,GoogleAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {getFirestore,collection,doc,onSnapshot,query,orderBy,limit} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
-import {getFunctions,httpsCallable} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-functions.js";
 
 const REDIRECT=location.origin+location.pathname; // 必須與 Developer Center 的 Redirect URI 完全一致
 const $=id=>document.getElementById(id),S=sessionStorage;
 const fmt=n=>(Math.round(n*100)/100).toFixed(2);
 const say=t=>{$("msg").textContent=t;};
-let db,fns,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null;
+let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null;
 
 // ---------- OAuth：Authorization Code + PKCE S256（瀏覽器端） ----------
 const b64u=b=>btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
@@ -73,7 +72,12 @@ async function gLogin(){
 async function act(name,data){
   if(busy)return null;if(!user){say("請先以 Google 帳號登入");return null;}if(!token){say("請先連結《無限煉製》帳號");return null;}
   busy=true;say("處理中…");render();
-  try{return (await httpsCallable(fns,name)({...data,iaToken:token})).data;}
+  try{
+    const r=await fetch(CFG.api+"/"+name,{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:JSON.stringify({...data,iaToken:token})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(j.error?.message||("HTTP "+r.status));
+    return j;
+  }
   catch(e){if(/授權失效/.test(e.message)){token=null;}say(e.message);return null;}
   finally{busy=false;render();}
 }
@@ -122,13 +126,13 @@ function render(){
 // ---------- 啟動 ----------
 async function main(){
   render();
-  if(CFG.firebase.apiKey==="REPLACE_ME"){say("請先在 config.js 填入 Firebase 與 Client ID 設定");return;}
-  const app=initializeApp(CFG.firebase);db=getFirestore(app);fns=getFunctions(app,CFG.region);
+  if([CFG.firebase.apiKey,CFG.ia.clientId,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase、Client ID 與 Worker 網址");return;}
+  const app=initializeApp(CFG.firebase);db=getFirestore(app);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
   onAuthStateChanged(auth,u=>{user=u;render();});
   await handleCallback();
   onSnapshot(collection(db,"stocks"),async snap=>{
-    if(snap.empty){httpsCallable(fns,"ensureMarket")({}).catch(()=>{});return;}
+    if(snap.empty){fetch(CFG.api+"/ensure-market",{method:"POST"}).catch(()=>{});return;}
     stocks={};snap.forEach(d=>stocks[d.id]=d.data());render();});
   onSnapshot(query(collection(db,"feed"),orderBy("at","desc"),limit(15)),snap=>{
     const f=$("feed");f.replaceChildren();snap.forEach(d=>{const x=d.data(),e=document.createElement("div");
