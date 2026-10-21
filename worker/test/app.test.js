@@ -1,31 +1,36 @@
 import test from "node:test";import assert from "node:assert";
 import {route,tick} from "../src/app.js";import {HttpError} from "../src/errors.js";import {fakeDb} from "./helpers.js";
-const env={ALLOWED_ORIGIN:"https://u.github.io"},H=3600e3;
+const env={ALLOWED_ORIGIN:"https://u.github.io"},H=3600e3,DAYMS=864e5;
 function mk(o={}){
-  const t={v:1.8e12},db=fakeDb(),state={me:{id:"iau_1",workshopName:"測試工坊"},provider:"google.com",uid:"g1",judges:0};
+  const t={v:1.8e12},db=fakeDb(),state={me:{id:"iau_1",workshopName:"測試工坊"},provider:"google.com",uid:"g1",name:"Botao",email:"player@example.com",emailVerified:true,judges:0,iaDown:false};
   const d={db,now:()=>t.v,rand:()=>.5,
-    verify:async()=>({uid:state.uid,provider:state.provider}),
-    ia:{me:async()=>state.me,history:async()=>[{result:"火",failed:false,createdAt:t.v-H},{result:"雷",failed:false,createdAt:t.v-H},{result:"水",failed:false,createdAt:t.v-25*H},{result:"土",failed:true,createdAt:t.v-H}]},
+    verify:async()=>({uid:state.uid,provider:state.provider,name:state.name,email:state.email,emailVerified:state.emailVerified}),
+    ia:{me:async()=>{if(state.iaDown)throw new HttpError(401,"unauthenticated","授權失效，請重新連結《無限煉製》");return state.me;},
+        history:async()=>[{result:"火",failed:false,createdAt:t.v-H},{result:"雷",failed:false,createdAt:t.v-H},{result:"水",failed:false,createdAt:t.v-25*H},{result:"土",failed:true,createdAt:t.v-H}]},
     judge:async()=>{state.judges++;return {score:90,reason:"火本身"};},...o};
   const call=async(p,body)=>{const r=await route(new Request("https://w"+p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})}),env,d);return {status:r.status,body:await r.json(),h:r.headers};};
   return {d,db,t,state,call};
 }
 const inj=(x={})=>({stockId:"fire",itemName:"火",iaToken:"tok12345",geminiKey:"k".repeat(12),...x});
-const H2=3600e3;
+const TR=(x={})=>({stockId:"fire",dir:1,...x});
+const BK=(x={})=>({...x});
 const MS=db=>db.m.get("market/state").data.stocks;
+const P=db=>db.m.get("players/g1").data;
+const feeds=db=>[...db.m].filter(([k])=>k.startsWith("feed/")).map(([,v])=>v.data);
+
 test("市場初始化（只做一次）",async()=>{
   const {call,db}=mk();await call("/ensure-market");await call("/ensure-market");
   assert.equal(Object.keys(MS(db)).length,6);assert.equal(MS(db).fire.t.length,1);
 });
-test("投入：只改變機率並走一步；玩家/動態/綁定一次寫好，CORS 正確",async()=>{
+test("投入：只改變機率並走一步；玩家(以 Google uid 為鍵)/動態/綁定一次寫好，CORS 正確",async()=>{
   const {call,db}=mk();await call("/ensure-market");
   const r=await call("/inject",inj());
   assert.equal(r.status,200);assert.equal(r.body.score,90);assert.equal(r.body.up,74);assert.equal(r.body.price,12.11);assert.ok(r.body.pct>0);
   assert.equal(r.h.get("Access-Control-Allow-Origin"),"https://u.github.io");
-  const f=MS(db).fire;assert.ok(Math.abs(f.bias-.2208)<1e-9);assert.deepEqual(f.p,[12,12.11]);assert.equal(f.t.length,2);assert.equal(f.last,"火（90分）");
-  assert.equal(MS(db).water.price,10);                    // 其他股票不受影響
-  assert.deepEqual(db.m.get("players/iau_1").data.hold,{});assert.equal(db.m.get("players/iau_1").data.cash,50);
-  const fd=[...db.m].find(([k])=>k.startsWith("feed/"))[1].data;assert.equal(fd.up,74);assert.equal(fd.stock,"火");
+  const f=MS(db).fire;assert.ok(Math.abs(f.bias-.2208)<1e-9);assert.deepEqual(f.p,[12,12.11]);assert.equal(f.last,"火（90分）");
+  assert.equal(MS(db).water.price,10);
+  assert.equal(P(db).name,"測試工坊");assert.equal(P(db).cash,50);assert.deepEqual(P(db).hold,{});assert.ok(typeof P(db).used["火"]==="number");
+  assert.equal(feeds(db)[0].up,74);assert.equal(feeds(db)[0].stock,"火");
   assert.equal(db.m.get("links/g1").data.iaId,"iau_1");assert.equal(db.m.get("iaLinks/iau_1").data.uid,"g1");
 });
 test("無關造物提高下跌機率",async()=>{
@@ -35,13 +40,13 @@ test("無關造物提高下跌機率",async()=>{
 test("排程：每檔隨機走一步，偏移衰減；衝突會重試；缺市場時會建立",async()=>{
   const {call,db,d}=mk();await call("/ensure-market");await call("/inject",inj());
   await tick(d);
-  const f=MS(db).fire;assert.equal(f.t.length,3);assert.ok(Math.abs(f.bias-.2208*.92)<1e-9);
-  assert.equal(MS(db).water.t.length,2);
+  const f=MS(db).fire;assert.equal(f.t.length,3);assert.ok(Math.abs(f.bias-.2208*.92)<1e-9);assert.equal(MS(db).water.t.length,2);
   db.failNext=2;await tick(d);assert.equal(MS(db).water.t.length,3);
   const e=mk();await tick(e.d);assert.equal(Object.keys(MS(e.db)).length,6);
 });
 test("未登入 / 非 Google 提供者 → 401",async()=>{
-  const a=mk();a.state.provider="anonymous";assert.equal((await a.call("/inject",inj())).status,401);
+  const a=mk();a.state.provider="anonymous";
+  for(const [p,b] of [["/inject",inj()],["/trade",TR()],["/bank",BK({action:"borrow",amount:5})]])assert.equal((await a.call(p,b)).status,401);
   const b=mk({verify:async()=>{throw new HttpError(401,"unauthenticated","x");}});assert.equal((await b.call("/trade",{})).status,401);
 });
 test("24 小時規則：過期與失敗的合成 → 403，且不呼叫 AI",async()=>{
@@ -55,64 +60,107 @@ test("冷卻 8 秒",async()=>{
   assert.equal((await call("/inject",inj())).status,429);
   t.v+=9000;assert.equal((await call("/inject",inj({itemName:"雷"}))).status,200);
 });
-test("Google ↔ 工坊 一對一綁定",async()=>{
-  const m=mk();await m.call("/ensure-market");await m.call("/trade",{stockId:"fire",dir:1,iaToken:"tok12345"});
-  m.state.uid="g2";assert.equal((await m.call("/trade",{stockId:"fire",dir:1,iaToken:"tok12345"})).status,409);
-  m.state.uid="g1";m.state.me={id:"iau_2"};assert.equal((await m.call("/trade",{stockId:"fire",dir:1,iaToken:"tok12345"})).status,409);
+test("Google ↔ 工坊 一對一綁定（投入時檢查）",async()=>{
+  const m=mk();await m.call("/ensure-market");await m.call("/inject",inj());m.t.v+=9000;
+  m.state.uid="g2";assert.equal((await m.call("/inject",inj({itemName:"雷"}))).status,409);
+  m.state.uid="g1";m.state.me={id:"iau_2"};assert.equal((await m.call("/inject",inj({itemName:"雷"}))).status,409);
 });
-test("買賣：扣款、持股、現金不足",async()=>{
-  const {call,db}=mk();await call("/ensure-market");
-  for(let i=0;i<4;i++)assert.equal((await call("/trade",{stockId:"fire",dir:1,iaToken:"tok12345"})).status,200);
-  assert.deepEqual(db.m.get("players/iau_1").data,{name:"測試工坊",cash:2,hold:{fire:4}});
-  assert.equal((await call("/trade",{stockId:"fire",dir:1,iaToken:"tok12345"})).status,409);
-  assert.equal((await call("/trade",{stockId:"water",dir:-1,iaToken:"tok12345"})).status,409);
+test("買賣不需要 IA：IA 失效也能買賣、借款",async()=>{
+  const {call,db,state}=mk();await call("/ensure-market");state.iaDown=true;
+  for(let i=0;i<4;i++)assert.equal((await call("/trade",TR())).status,200);
+  assert.deepEqual(P(db),{name:"Botao",cash:2,hold:{fire:4}});
+  assert.equal((await call("/trade",TR())).status,409);
+  assert.equal((await call("/trade",TR({stockId:"water",dir:-1}))).status,409);
+  assert.equal((await call("/bank",BK({action:"borrow",amount:10}))).status,200);
+  assert.equal((await call("/inject",inj())).status,401);                // 只有投入需要 IA
 });
 test("樂觀鎖衝突會自動重試",async()=>{
   const {call,db}=mk();await call("/ensure-market");db.failNext=2;
-  assert.equal((await call("/trade",{stockId:"fire",dir:1,iaToken:"tok12345"})).status,200);
+  assert.equal((await call("/trade",TR())).status,200);
 });
 test("參數檢查與 OPTIONS",async()=>{
   const {call,d}=mk();await call("/ensure-market");
   assert.equal((await call("/inject",inj({stockId:"../x"}))).status,400);
-  assert.equal((await call("/trade",{stockId:"fire",dir:5,iaToken:"tok12345"})).status,400);
-  const r=await route(new Request("https://w/inject",{method:"OPTIONS"}),env,d);assert.equal(r.status,204);
+  assert.equal((await call("/trade",TR({dir:5}))).status,400);
+  assert.equal((await route(new Request("https://w/inject",{method:"OPTIONS"}),env,d)).status,204);
 });
-
 test("每個造物每天限一次；24 小時後可再投入，過期紀錄會被清掉",async()=>{
   const {call,db,t}=mk();await call("/ensure-market");
   assert.equal((await call("/inject",inj())).status,200);
-  assert.ok(typeof db.m.get("players/iau_1").data.used["火"]==="number");
   t.v+=9000;let r=await call("/inject",inj());assert.equal(r.status,409);assert.match(r.body.error.message,/今天已經投入/);
-  r=await call("/inject",inj({itemName:"雷"}));assert.equal(r.status,200);
-  assert.deepEqual(Object.keys(db.m.get("players/iau_1").data.used).sort(),["火","雷"].sort());
-  t.v+=25*H2;r=await call("/inject",inj());assert.equal(r.status,200);
-  assert.deepEqual(Object.keys(db.m.get("players/iau_1").data.used),["火"]);
+  assert.equal((await call("/inject",inj({itemName:"雷"}))).status,200);
+  assert.deepEqual(Object.keys(P(db).used).sort(),["火","雷"].sort());
+  t.v+=25*H;assert.equal((await call("/inject",inj())).status,200);assert.deepEqual(Object.keys(P(db).used),["火"]);
 });
 
-const BK=(x={})=>({iaToken:"tok12345",...x});
-test("銀行：借款→利息累計→還款；欠款不被其他操作覆蓋",async()=>{
+test("銀行：無限借款→利息累計→還款；欠款不被其他操作覆蓋",async()=>{
   const {call,db,t}=mk();await call("/ensure-market");
   let r=await call("/bank",BK({action:"borrow",amount:50}));assert.equal(r.status,200);assert.equal(r.body.cash,100);assert.equal(r.body.owed,50);
-  assert.deepEqual(db.m.get("players/iau_1").data.loan,{p:50,t:t.v});assert.deepEqual(db.m.get("players/iau_1").data.hold,{});
-  await call("/trade",{stockId:"fire",dir:1,iaToken:"tok12345"});assert.equal(db.m.get("players/iau_1").data.loan.p,50);   // 買股票不影響欠款
+  assert.deepEqual(P(db).loan,{p:50,t:t.v});assert.deepEqual(P(db).hold,{});
+  await call("/trade",TR());assert.equal(P(db).loan.p,50);
   t.v+=DAYMS;r=await call("/bank",BK({action:"repay",amount:10}));assert.equal(r.status,200);assert.equal(r.body.owed,42.5);assert.equal(r.body.cash,78);
-  r=await call("/bank",BK({action:"repay",all:true}));assert.equal(r.status,200);assert.equal(r.body.owed,0);assert.equal(r.body.cash,35.5);
+  r=await call("/bank",BK({action:"repay",all:true}));assert.equal(r.body.owed,0);assert.equal(r.body.cash,35.5);
   assert.equal((await call("/bank",BK({action:"repay",all:true}))).status,409);
+  r=await call("/bank",BK({action:"borrow",amount:5000}));assert.equal(r.status,200);assert.equal(r.body.cash,5035.5);   // 想借多少都行
 });
-test("銀行：上限、現金不足、金額檢查、需要登入",async()=>{
-  const {call,t,state}=mk();await call("/ensure-market");
-  assert.equal((await call("/bank",BK({action:"borrow",amount:60}))).status,200);
-  assert.equal((await call("/bank",BK({action:"borrow",amount:60}))).status,409);
-  t.v+=10*DAYMS;                                                    // 利息滾到 ≈97.7，現金 110 夠；再借會超過上限
-  assert.equal((await call("/bank",BK({action:"borrow",amount:10}))).status,409);
-  for(const bad of [0,-5,"abc",101,null])assert.equal((await call("/bank",BK({action:"borrow",amount:bad}))).status,400);
-  assert.equal((await call("/bank",BK({action:"steal",amount:5}))).status,400);
-  state.provider="anonymous";assert.equal((await call("/bank",BK({action:"borrow",amount:5}))).status,401);
-});
-test("銀行：現金不足時不能還款",async()=>{
+test("銀行：金額檢查、現金不足不能還款",async()=>{
   const {call,t}=mk();await call("/ensure-market");
-  await call("/bank",BK({action:"borrow",amount:100}));
-  for(let i=0;i<12;i++)await call("/trade",{stockId:"steam",dir:1,iaToken:"tok12345"});   // 18×… 把現金花光
+  for(const bad of [0,-5,"abc",2e6,null])assert.equal((await call("/bank",BK({action:"borrow",amount:bad}))).status,400);
+  assert.equal((await call("/bank",BK({action:"steal",amount:5}))).status,400);
+  await call("/bank",BK({action:"borrow",amount:90}));
+  for(let i=0;i<8;i++)await call("/trade",TR({stockId:"steam"}));
   t.v+=3*DAYMS;const r=await call("/bank",BK({action:"repay",all:true}));assert.equal(r.status,409);assert.match(r.body.error.message,/現金不足/);
 });
-const DAYMS=864e5;
+
+test("黑道：欠款超過 100 並拖過 24 小時 → 資產清空重新開始，全服動態留下紀錄",async()=>{
+  const {call,db,t}=mk();await call("/ensure-market");
+  await call("/bank",BK({action:"borrow",amount:150}));await call("/trade",TR());                 // 現金 200 → 買 1 股
+  t.v+=23*H;assert.equal((await call("/trade",TR())).status,200);                              // 23 小時：還安全
+  t.v+=2*H;const r=await call("/trade",TR());                                                  // 25 小時：黑道上門
+  assert.equal(r.status,409);assert.equal(r.body.error.code,"mob");assert.match(r.body.error.message,/黑道/);
+  assert.deepEqual([P(db).cash,P(db).hold,P(db).loan.p,P(db).bankrupt],[50,{},0,1]);
+  const mob=feeds(db).find(x=>x.mob);assert.equal(mob.who,"Botao");assert.ok(mob.owed>150);
+  assert.equal((await call("/trade",TR())).status,200);                                        // 重新開始後可以正常玩
+  assert.equal(P(db).cash,38);assert.equal(P(db).bankrupt,1);
+});
+test("黑道：還到 100 以下就解除；之後超過才重新計時；check 與投入也會觸發",async()=>{
+  const {call,db,t,state}=mk();await call("/ensure-market");
+  await call("/bank",BK({action:"borrow",amount:150}));
+  t.v+=20*H;assert.equal((await call("/bank",BK({action:"repay",amount:60}))).status,200);        // 還到約 100 以下
+  t.v+=200*H;assert.equal((await call("/bank",BK({action:"check"}))).status,409);                 // 利息把欠款又推過 100，隔很久才發現 → 當然要上門
+  const a=mk();await a.call("/ensure-market");await a.call("/bank",BK({action:"borrow",amount:99}));
+  a.t.v+=28*H;assert.equal((await a.call("/bank",BK({action:"check"}))).status,200);              // 利息約 5 小時後越線，28 小時時才過 23 小時
+  a.t.v+=2*H;const r=await a.call("/bank",BK({action:"check"}));assert.equal(r.status,409);assert.equal(r.body.error.code,"mob");
+  const b=mk();await b.call("/ensure-market");await b.call("/bank",BK({action:"borrow",amount:150}));b.t.v+=25*H;
+  const j=await b.call("/inject",inj());assert.equal(j.status,409);assert.equal(j.body.error.code,"mob");assert.equal(b.state.judges,0);   // 不會白花 AI 額度
+});
+test("黑道：安全範圍內（≤100）不會被找上，再久也不會",async()=>{
+  const {call,t}=mk();await call("/ensure-market");await call("/bank",BK({action:"borrow",amount:100}));
+  t.v+=DAYMS/100;assert.equal((await call("/bank",BK({action:"check"}))).status,200);    // 剛借時 = 100，利息一跑就超過；這裡只驗證極短時間內不誤殺
+  const s=mk();await s.call("/ensure-market");await s.call("/bank",BK({action:"borrow",amount:60}));s.t.v+=10*DAYMS;
+  assert.equal((await s.call("/bank",BK({action:"check"}))).status,200);                  // 60×1.05^10≈97.7，仍在 100 內
+});
+
+const DEV="dev@example.com";
+const asDev=(o={})=>{const m=mk({devEmails:[DEV],...o});m.state.email=DEV;m.state.emailVerified=true;return m;};
+test("開發者：不需要 IA，可自己打字輸入任何造物；不計入每日限制；動態會標示",async()=>{
+  const {call,db,state,t}=asDev();await call("/ensure-market");state.iaDown=true;
+  const r=await call("/inject",{stockId:"fire",itemName:"  我亂打的東西  ",geminiKey:"k".repeat(12)});
+  assert.equal(r.status,200);assert.equal(state.judges,1);
+  const f=feeds(db).find(x=>x.item==="我亂打的東西");assert.equal(f.dev,true);assert.equal(f.who,"Botao");
+  assert.equal(P(db).used,undefined);assert.equal(db.m.has("links/g1"),false);                    // 不綁 IA、不記每日使用
+  assert.equal((await call("/inject",{stockId:"fire",itemName:"我亂打的東西",geminiKey:"k".repeat(12)})).status,429);   // 冷卻仍有效
+  t.v+=9000;assert.equal((await call("/inject",{stockId:"fire",itemName:"我亂打的東西",geminiKey:"k".repeat(12)})).status,200); // 同名可重複
+  assert.equal((await call("/inject",{stockId:"fire",itemName:"x".repeat(61),geminiKey:"k".repeat(12)})).status,400);
+});
+test("開發者判斷：信箱未驗證、不在名單、名單為空、大小寫",async()=>{
+  const a=asDev();a.state.emailVerified=false;await a.call("/ensure-market");a.state.iaDown=true;
+  assert.equal((await a.call("/inject",{stockId:"fire",itemName:"亂打",geminiKey:"k".repeat(12)})).status,401);   // 未驗證 → 當一般玩家，需要 IA
+  const b=mk({devEmails:[DEV]});b.state.email="someone@x.com";b.state.emailVerified=true;await b.call("/ensure-market");b.state.iaDown=true;
+  assert.equal((await b.call("/inject",{stockId:"fire",itemName:"亂打",geminiKey:"k".repeat(12)})).status,401);
+  const c=mk();c.state.email=DEV;c.state.emailVerified=true;await c.call("/ensure-market");c.state.iaDown=true;                      // 沒設定 DEV_EMAILS
+  assert.equal((await c.call("/inject",{stockId:"fire",itemName:"亂打",geminiKey:"k".repeat(12)})).status,401);
+  const d2=mk({devEmails:[DEV]});d2.state.email=DEV;d2.state.emailVerified=true;
+  assert.equal((await d2.call("/whoami")).body.dev,true);assert.equal((await b.call("/whoami")).body.dev,false);assert.equal((await a.call("/whoami")).body.dev,false);
+  a.state.provider="anonymous";assert.equal((await a.call("/whoami")).status,401);
+});

@@ -46,19 +46,38 @@ test("每個造物每 24 小時限一次，過期自動清掉",()=>{
   assert.deepEqual(markUsed({水:now-25*h,雷:now-h},"火",now),{雷:now-h,火:now});
 });
 
-import {owed,borrow,repay,DEBT_CAP,RATE} from "../src/logic.js";
-test("銀行：5%/24 小時複利、借款上限、部分/全額還款",()=>{
+import {owed,borrow,repay,overAt,mobDue,MOB_LIMIT,RATE} from "../src/logic.js";
+test("銀行：5%/24 小時複利、無借款上限、部分/全額還款",()=>{
   const t0=1e13;
   assert.equal(owed(undefined,t0),0);assert.equal(owed({p:0,t:t0},t0),0);
   assert.ok(near(owed({p:50,t:t0},t0+DAY),52.5));assert.ok(near(owed({p:100,t:t0},t0+2*DAY),110.25));
-  assert.ok(near(owed({p:50,t:t0},t0+DAY/2),50*Math.sqrt(1.05)));
+  assert.ok(near(owed({p:50,t:t0},t0+DAY/2),50*Math.sqrt(1.05)));assert.equal(RATE,.05);
   let r=borrow({cash:50},50,t0);assert.deepEqual(r,{cash:100,loan:{p:50,t:t0}});
-  assert.throws(()=>borrow({cash:50,loan:{p:60,t:t0}},50,t0),/上限/);
-  assert.equal(DEBT_CAP,100);assert.equal(RATE,.05);
+  r=borrow({cash:50},5000,t0);assert.equal(r.cash,5050);assert.equal(r.loan.p,5000);          // 可以無限借
+  assert.throws(()=>borrow({cash:0},2e9,t0),/過大/);
   const d={cash:100,loan:{p:50,t:t0}};
   r=repay(d,20,t0+DAY,false);assert.equal(r.cash,80);assert.ok(near(r.loan.p,32.5));
-  r=repay(d,0,t0+DAY,true);assert.equal(r.cash,47.5);assert.equal(r.loan.p,0);
-  r=repay(d,999,t0+DAY,false);assert.equal(r.loan.p,0);              // 超額還款視為全額
+  r=repay(d,0,t0+DAY,true);assert.equal(r.cash,47.5);assert.deepEqual(r.loan,{p:0,t:t0+DAY});
+  r=repay(d,999,t0+DAY,false);assert.equal(r.loan.p,0);
   assert.throws(()=>repay({cash:10,loan:{p:50,t:t0}},0,t0,true),/現金不足/);
   assert.throws(()=>repay({cash:10},5,t0,false),/沒有欠款/);
+});
+test("黑道：欠款連續超過上限滿 24 小時才會上門",()=>{
+  const t0=1e13,h=3600e3;
+  assert.equal(MOB_LIMIT,100);
+  // 剛好在上限內 → 永遠安全（只要沒超過）
+  assert.equal(overAt({p:90,t:t0},t0),null);assert.equal(mobDue({p:90,t:t0},t0+2*h),false);
+  // 一次借到 150：從借款當下起算，24 小時後上門
+  let r=borrow({cash:50},150,t0);assert.equal(r.loan.over,t0);
+  assert.equal(mobDue(r.loan,t0+23*h),false);assert.equal(mobDue(r.loan,t0+24*h),true);
+  // 還到上限以下 → 計時歸零；再超過才重新計時
+  const full={cash:1000,loan:r.loan};
+  let r2=repay(full,60,t0+10*h,false);assert.ok(r2.loan.p<=MOB_LIMIT&&r2.loan.over===undefined);
+  assert.equal(mobDue(r2.loan,t0+60*h),false);assert.equal(mobDue(r2.loan,t0+100*h),true);   // 還款後利息又把欠款推過上限：越線約在 +45 小時，+69 小時上門
+  // 仍高於上限的部分還款，不會重置計時
+  let r3=repay(full,10,t0+10*h,false);assert.equal(r3.loan.over,t0);assert.equal(mobDue(r3.loan,t0+24*h),true);
+  // 由利息把 99 推過 100：以公式反推越線時間，再滿 24 小時才上門
+  const lo={p:99,t:t0},cross=t0+DAY*Math.log(100/99)/Math.log(1.05);
+  assert.ok(near(overAt(lo,t0+30*h),cross,1));assert.equal(mobDue(lo,cross+23*h),false);assert.equal(mobDue(lo,cross+24*h+1),true);
+  assert.equal(mobDue(undefined,t0),false);assert.equal(mobDue({p:0,t:t0},t0+99*DAY),false);
 });

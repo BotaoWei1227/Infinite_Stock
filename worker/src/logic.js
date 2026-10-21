@@ -32,19 +32,30 @@ export function recent(items,now){
 export const usedRecent=(u,name,now)=>{const t=(u||{})[name];return typeof t==="number"&&now-t<DAY&&t<=now+60000;};
 export const markUsed=(u,name,now)=>({...Object.fromEntries(Object.entries(u||{}).filter(([,t])=>typeof t==="number"&&now-t<DAY)),[name]:now});
 
-// ---- 銀行（高利貸）：利率 5% / 24 小時，按時間連續複利；借款上限 100
-export const RATE=.05,DEBT_CAP=100;
+// ---- 銀行（高利貸）：利率 5% / 24 小時，按時間連續複利；可無限借款
+// ---- 黑道：欠款超過 MOB_LIMIT 並「連續」超過 24 小時 → 黑道上門，資產清空重新開始
+export const RATE=.05,MOB_LIMIT=100,MAX_DEBT=1e9;
 const cents=n=>Math.round(n*100)/100;
 export const owed=(loan,now)=>loan&&loan.p>0?loan.p*Math.pow(1+RATE,Math.max(0,now-loan.t)/DAY):0;
+// 欠款「開始連續超過上限」的時間點；沒超過則 null（利息把欠款推過上限的時間點用公式反推）
+export function overAt(loan,now){
+  if(!loan||!(loan.p>0))return null;
+  if(owed(loan,now)<=MOB_LIMIT)return null;
+  if(loan.over!=null)return loan.over;
+  if(loan.p>=MOB_LIMIT)return loan.t;
+  return loan.t+DAY*Math.log(MOB_LIMIT/loan.p)/Math.log(1+RATE);
+}
+export const mobDue=(loan,now)=>{const o=overAt(loan,now);return o!=null&&now-o>=DAY;};
+const nextLoan=(prev,p,now)=>p>MOB_LIMIT?{p,t:now,over:overAt(prev,now)??now}:{p,t:now};
 export function borrow(d,amount,now){
   const o=owed(d.loan,now);
-  if(o+amount>DEBT_CAP+1e-9)throw new Error(`超過借款上限（欠款加新借款不能超過 ${DEBT_CAP}）`);
-  return {cash:cents(d.cash+amount),loan:{p:cents(o+amount),t:now}};
+  if(o+amount>MAX_DEBT)throw new Error("借款總額過大");
+  return {cash:cents(d.cash+amount),loan:nextLoan(d.loan,cents(o+amount),now)};
 }
 export function repay(d,amount,now,all){
   const o=owed(d.loan,now);
   if(o<.005)throw new Error("目前沒有欠款");
   const full=all||amount>=o,pay=full?Math.ceil(o*100-1e-9)/100:amount;
   if(d.cash+1e-9<pay)throw new Error("現金不足");
-  return {cash:cents(d.cash-pay),loan:{p:full?0:cents(o-pay),t:now}};
+  return {cash:cents(d.cash-pay),loan:full?{p:0,t:now}:nextLoan(d.loan,cents(o-pay),now)};
 }

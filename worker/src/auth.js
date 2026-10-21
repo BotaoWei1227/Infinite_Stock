@@ -22,5 +22,6 @@ export async function verifyFirebaseToken(request,env,fetchFn=fetch,now=Date.now
   if(!(await crypto.subtle.verify("RSASSA-PKCS1-v1_5",key,unb64(p[2]),te.encode(p[0]+"."+p[1]))))throw bad();
   const pid=env.FIREBASE_PROJECT_ID;
   if(c.iss!==`https://securetoken.google.com/${pid}`||c.aud!==pid||!c.sub||!(c.exp*1000>now)||c.iat*1000>now+60000)throw bad();
-  return {uid:c.sub,provider:c.firebase?.sign_in_provider};
+  return {uid:c.sub,provider:c.firebase?.sign_in_provider,name:typeof c.name==="string"?c.name.slice(0,40):"",
+    email:typeof c.email==="string"?c.email.toLowerCase():"",emailVerified:c.email_verified===true};
 }

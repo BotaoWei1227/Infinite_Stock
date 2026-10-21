@@ -14,7 +14,12 @@ async function mk(over={},tamper=false){
   return h+"."+c+"."+s;
 }
 const req=t=>new Request("https://w/x",{headers:t?{Authorization:"Bearer "+t}:{}});
-test("有效 token",async()=>{_reset();assert.deepEqual(await verifyFirebaseToken(req(await mk()),env,fetchJwks,now),{uid:"uid1",provider:"google.com"});});
+test("有效 token",async()=>{_reset();assert.deepEqual(await verifyFirebaseToken(req(await mk()),env,fetchJwks,now),{uid:"uid1",provider:"google.com",name:"",email:"",emailVerified:false});
+  assert.equal((await verifyFirebaseToken(req(await mk({name:"Botao"})),env,fetchJwks,now)).name,"Botao");
+  const e=await verifyFirebaseToken(req(await mk({email:"Dev@Example.com",email_verified:true})),env,fetchJwks,now);
+  assert.deepEqual([e.email,e.emailVerified],["dev@example.com",true]);
+  assert.equal((await verifyFirebaseToken(req(await mk({email:"a@b.c",email_verified:"true"})),env,fetchJwks,now)).emailVerified,false);   // 只認布林 true
+});
 test("拒絕：無 token / 簽章被改 / aud 錯 / 過期 / iss 錯",async()=>{
   _reset();
   for(const r of [req(null),req(await mk({},true)),req(await mk({aud:"other"})),req(await mk({exp:now/1000-1})),req(await mk({iss:"https://evil"}))])
