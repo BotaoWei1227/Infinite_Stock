@@ -25,22 +25,22 @@ test("市場初始化（只做一次）",async()=>{
 test("投入：只改變機率、價格不跳動；玩家(以 Google uid 為鍵)/動態/綁定一次寫好，CORS 正確",async()=>{
   const {call,db}=mk();await call("/ensure-market");
   const r=await call("/inject",inj());
-  assert.equal(r.status,200);assert.equal(r.body.score,90);assert.equal(r.body.up,54);assert.equal(r.body.price,12);
+  assert.equal(r.status,200);assert.equal(r.body.score,90);assert.equal(r.body.up,53);assert.equal(r.body.price,12);assert.equal(r.body.pass,true);assert.equal(r.body.threshold,70);
   assert.equal(r.h.get("Access-Control-Allow-Origin"),"https://u.github.io");
-  const f=MS(db).fire;assert.ok(Math.abs(f.bias-.04)<1e-9);assert.deepEqual(f.p,[12]);assert.equal(f.t.length,1);assert.equal(f.last,"火（90分）");   // 沒有新的價格點
+  const f=MS(db).fire;assert.ok(Math.abs(f.bias-.05*20/30)<1e-9);assert.deepEqual(f.p,[12]);assert.equal(f.t.length,1);assert.equal(f.last,"火（90分）");   // 沒有新的價格點
   assert.equal(MS(db).water.price,10);
   assert.equal(P(db).name,"測試工坊");assert.equal(P(db).cash,50);assert.deepEqual(P(db).hold,{});assert.ok(typeof P(db).used["火"]==="number");
-  assert.equal(feeds(db)[0].up,54);assert.equal("pct" in feeds(db)[0],false);assert.equal(feeds(db)[0].stock,"火");
+  assert.equal(feeds(db)[0].up,53);assert.equal(feeds(db)[0].pass,true);assert.equal("pct" in feeds(db)[0],false);assert.equal(feeds(db)[0].stock,"火");
   assert.equal(db.m.get("links/g1").data.iaId,"iau_1");assert.equal(db.m.get("iaLinks/iau_1").data.uid,"g1");
 });
 test("無關造物提高下跌機率",async()=>{
   const {call,db}=mk({judge:async()=>({score:10,reason:"無關"})});await call("/ensure-market");
-  const r=await call("/inject",inj());assert.equal(r.body.up,46);assert.ok(MS(db).fire.bias<0);
+  const r=await call("/inject",inj());assert.equal(r.body.up,46);assert.equal(r.body.pass,false);assert.ok(MS(db).fire.bias<0);
 });
 test("排程：每檔隨機走一步，偏移衰減；衝突會重試；缺市場時會建立",async()=>{
-  const {call,db,d}=mk();await call("/ensure-market");await call("/inject",inj());
-  await tick(d);
-  const f=MS(db).fire;assert.equal(f.t.length,2);assert.ok(Math.abs(f.bias-.04*.92)<1e-9);assert.equal(MS(db).water.t.length,2);
+  const {call,db,d,t}=mk();await call("/ensure-market");await call("/inject",inj());
+  t.v+=5*60*1000;await tick(d);
+  const f=MS(db).fire;assert.equal(f.t.length,2);assert.ok(Math.abs(f.bias-(.05*20/30)*.9)<1e-9);assert.equal(f.biasAt,t.v);assert.equal(MS(db).water.t.length,2);
   db.failNext=2;await tick(d);assert.equal(MS(db).water.t.length,3);
   const e=mk();await tick(e.d);assert.equal(Object.keys(MS(e.db)).length,6);
 });
@@ -180,4 +180,30 @@ test("多人同時買賣會疊加但被上限擋住，且彼此不互相覆蓋",
   const A=mk(),db=A.db;await A.call("/ensure-market");
   for(const [uid,name] of [["g1","甲"],["g2","乙"],["g3","丙"]]){A.state.uid=uid;A.state.name=name;await A.call("/trade",TR());}
   assert.ok(Math.abs(MS(db).fire.bias-.03)<1e-9);assert.equal(["g1","g2","g3"].every(u=>db.m.get("players/"+u).data.hold.fire===1),true);
+});
+
+test("門檻：剛好等於 70 不算通過（沒有影響）；71 才通過",async()=>{
+  for(const [sim,pass,bias] of [[70,false,0],[71,true,.05/30],[69,false,-.05/70]]){
+    const {call,db}=mk({judge:async()=>({score:sim,reason:"x",relation:"strong"})});await call("/ensure-market");
+    const r=await call("/inject",inj());assert.equal(r.body.pass,pass,String(sim));assert.ok(Math.abs(MS(db).fire.bias-bias)<1e-9,String(sim));
+  }
+});
+
+test("投入的機率提升每 5 分鐘降 10%（兩個方向都回到 50%），且與排程間隔無關",async()=>{
+  const M=300000;
+  const up=mk({judge:async()=>({score:100,reason:"x",relation:"direct"})}),dn=mk({judge:async()=>({score:0,reason:"x",relation:"none"})});
+  for(const x of [up,dn]){await x.call("/ensure-market");await x.call("/inject",inj());}
+  assert.ok(Math.abs(MS(up.db).fire.bias-.05)<1e-9);assert.ok(Math.abs(MS(dn.db).fire.bias+.05)<1e-9);
+  const seen=[];
+  for(let i=1;i<=40;i++){for(const x of [up,dn]){x.t.v+=M;await tick(x.d);}seen.push([MS(up.db).fire.bias,MS(dn.db).fire.bias]);}
+  assert.ok(Math.abs(seen[0][0]-.045)<1e-9&&Math.abs(seen[0][1]+.045)<1e-9);                           // 5 分鐘後剩 90%
+  assert.ok(Math.abs(seen[9][0]-.05*Math.pow(.9,10))<1e-9);                                           // 50 分鐘後
+  assert.deepEqual(seen[39],[0,0]);                                                                   // 久了回到 50%
+  // 每 2 分鐘一次與每 10 分鐘一次，結果相同
+  const a=mk({judge:async()=>({score:100,reason:"x",relation:"direct"})}),b=mk({judge:async()=>({score:100,reason:"x",relation:"direct"})});
+  for(const x of [a,b]){await x.call("/ensure-market");await x.call("/inject",inj());}
+  for(let i=0;i<5;i++){a.t.v+=120000;await tick(a.d);}b.t.v+=600000;await tick(b.d);
+  assert.ok(Math.abs(MS(a.db).fire.bias-MS(b.db).fire.bias)<1e-9);assert.ok(Math.abs(MS(a.db).fire.bias-.05*.81)<1e-9);
+  // 買賣疊加在「已衰減」的值上
+  b.t.v+=M;await b.call("/trade",TR());assert.ok(Math.abs(MS(b.db).fire.bias-(.05*.81*.9+.01))<1e-9);
 });

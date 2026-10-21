@@ -4,18 +4,23 @@ export const clamp=(x,a,b)=>Math.min(b,Math.max(a,x));
 const rd=n=>Math.round(n*100)/100;
 export const upProb=bias=>clamp(.5+bias,.1,.9);
 // 機率偏移（bias）＝上漲機率 − 50%。人多時每個人的影響都要小，所以單次很輕、總量有上限：
-//   投入造物：相關(≥50)提高「漲」的機率，無關(<50)提高「跌」的機率，滿分/零分一次最多 ±5 個百分點
+//   投入造物：相似度高過門檻 → 提高「漲」的機率，沒高過 → 提高「跌」的機率，一次最多 ±5 個百分點
 //   買賣：每買 1 股 +1 個百分點、每賣 1 股 −1 個百分點（買賣壓力）
-//   所有人加起來最多 ±15 個百分點（上漲機率 35%–65%），並隨時間衰減（每 2 分鐘 ×0.92）
-export const INJECT_MAX=.05,BIAS_CAP=.15,TRADE_NUDGE=.01;
-export const nudge=(bias,score)=>clamp((bias||0)+(score>=50?(score-50)/50:-(50-score)/50)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
+//   所有人加起來最多 ±15 個百分點（上漲機率 35%–65%）
+//   衰減：每過 5 分鐘只剩 90%（高於 50% 的機率往下掉、低於 50% 的往上回升），小於 0.5 個百分點就直接歸零（回到 50%）。按真實時間計算，與排程間隔無關
+export const INJECT_MAX=.05,BIAS_CAP=.15,TRADE_NUDGE=.01,DECAY=.9,DECAY_MS=5*60*1000;
+export const effBias=(s,now)=>{const b=s.bias||0;if(!b)return 0;const e=b*Math.pow(DECAY,Math.max(0,now-(s.biasAt??now))/DECAY_MS);return Math.abs(e)<.005?0:e;};
+// 相似度（0–100）必須「高過」門檻才算相關：相似度越高於門檻，提高上漲機率越多（100 時為滿額）；
+// 沒高過就視為無關：越低於門檻，提高下跌機率越多（0 時為滿額）。剛好等於門檻 → 沒有影響
+export const SIM_THRESHOLD=70;
+export const passes=sim=>sim>SIM_THRESHOLD;
+export const nudge=(bias,sim)=>clamp((bias||0)+(passes(sim)?(sim-SIM_THRESHOLD)/(100-SIM_THRESHOLD):-(SIM_THRESHOLD-sim)/SIM_THRESHOLD)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
 export const tradeNudge=(bias,dir)=>clamp((bias||0)+dir*TRADE_NUDGE,-BIAS_CAP,BIAS_CAP);
-// 行情走一步：方向隨機（上漲機率 = .5+bias），幅度 0.3–1.5%，加微弱均值回歸避免漂離基準價；偏移每步衰減 8%
+// 行情走一步：方向隨機（上漲機率 = .5+衰減後的 bias），幅度 0.3–1.5%，加微弱均值回歸避免漂離基準價
 export function step(s,r1,r2,now,last){
-  const bias=s.bias||0,up=r1<upProb(bias),mag=.003+r2*.012,pull=.01*Math.log(s.base/s.price);
+  const bias=effBias(s,now),up=r1<upProb(bias),mag=.003+r2*.012,pull=.01*Math.log(s.base/s.price);
   const price=clamp(rd(s.price*(1+(up?mag:-mag)+pull)),1,s.base*5);
-  const nb=bias*.92;
-  return {...s,price,bias:Math.abs(nb)<.005?0:nb,
+  return {...s,price,bias,biasAt:now,
     t:[...(s.t||[]),now].slice(-MAXH),p:[...(s.p||[]),price].slice(-MAXH),...(last!==undefined?{last}:{})};
 }
 export function trade(d,id,price,dir){

@@ -1,9 +1,12 @@
 import test from "node:test";import assert from "node:assert";
-import {upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,TRADE_NUDGE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
+import {effBias,DECAY,DECAY_MS,SIM_THRESHOLD,passes,upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,TRADE_NUDGE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
 const near=(a,b,e=1e-9)=>Math.abs(a-b)<e;
 const S=(o={})=>({price:12,base:12,bias:0,t:[0],p:[12],...o});
-test("偏移：單次很輕、總量有上限；投入與買賣方向正確",()=>{
-  assert.ok(near(nudge(0,100),.05));assert.ok(near(nudge(0,0),-.05));assert.equal(nudge(0,50),0);assert.ok(near(nudge(0,90),.04));
+test("相似度門檻：要高過 70 才算相關；越高於/低於門檻影響越大；等於門檻沒有影響",()=>{
+  assert.equal(SIM_THRESHOLD,70);assert.equal(passes(71),true);assert.equal(passes(70),false);assert.equal(passes(0),false);
+  assert.ok(near(nudge(0,100),.05));assert.ok(near(nudge(0,0),-.05));assert.equal(nudge(0,70),0);
+  assert.ok(near(nudge(0,85),.025));assert.ok(near(nudge(0,71),.05/30));                  // 剛高過門檻 → 只有一點點
+  assert.ok(near(nudge(0,35),-.025));assert.ok(near(nudge(0,69),-.05/70));                // 剛低於門檻 → 只降一點點
   assert.equal(nudge(.14,100),.15);assert.equal(nudge(-.14,0),-.15);                      // 上限 ±15 個百分點
   assert.ok(near(tradeNudge(0,1),.01));assert.ok(near(tradeNudge(0,-1),-.01));assert.equal(tradeNudge(.15,1),.15);assert.equal(tradeNudge(-.15,-1),-.15);
   assert.ok(near(upProb(.3),.8));assert.equal(upProb(.4),.9);assert.equal(upProb(-.4),.1);
@@ -18,9 +21,9 @@ test("走一步：機率決定方向，幅度 0.3–1.5%",()=>{
   const lo=step(S(),.4,0,1).price/12-1,hi=step(S(),.4,1,1).price/12-1;
   assert.ok(lo>=.0029&&hi<=.0151);
 });
-test("偏移每步衰減，過小歸零；價格下限 1；均值回歸",()=>{
-  assert.ok(near(step(S({bias:.3}),.5,.5,1).bias,.276));
-  assert.equal(step(S({bias:.005}),.5,.5,1).bias,0);
+test("價格下限 1；均值回歸；走一步時偏移會先衰減到現在",()=>{
+  assert.ok(near(step(S({bias:.3,biasAt:0}),.5,.5,5*60*1000).bias,.27));
+  assert.equal(step(S({bias:.004}),.5,.5,1).bias,0);
   assert.equal(step(S({price:1,base:1}),.9,.5,1).price,1);
   const r=step(S({price:24}),.1,.5,1).price;assert.ok(r>24&&r<24*1.009); // 價格偏高時，上漲被壓制
 });
@@ -83,4 +86,16 @@ test("黑道：欠款連續超過上限滿 24 小時才會上門",()=>{
   const lo={p:99,t:t0},cross=t0+DAY*Math.log(100/99)/Math.log(1.05);
   assert.ok(near(overAt(lo,t0+30*h),cross,1));assert.equal(mobDue(lo,cross+23*h),false);assert.equal(mobDue(lo,cross+24*h+1),true);
   assert.equal(mobDue(undefined,t0),false);assert.equal(mobDue({p:0,t:t0},t0+99*DAY),false);
+});
+
+test("機率提升每 5 分鐘降 10%，直到回到 50%；低於 50% 的對稱回升",()=>{
+  const M=5*60*1000,hi={bias:.1,biasAt:0},lo={bias:-.1,biasAt:0};
+  assert.equal(DECAY,.9);assert.equal(DECAY_MS,M);
+  assert.ok(near(effBias(hi,0),.1));assert.ok(near(effBias(hi,M),.09));assert.ok(near(effBias(hi,2*M),.081));assert.ok(near(effBias(hi,10*M),.1*Math.pow(.9,10)));
+  assert.ok(near(effBias(lo,M),-.09));assert.ok(near(effBias(lo,2*M),-.081));                       // 低於 50%：每 5 分鐘回升 10%
+  assert.ok(near(effBias(hi,2.5*60*1000),.1*Math.pow(.9,.5)));                                      // 按真實時間，不是一格一格跳
+  assert.equal(effBias(hi,40*M),0);assert.equal(effBias(lo,40*M),0);                                // 久了就回到 50%（小於 0.5 個百分點歸零）
+  assert.equal(effBias({bias:.1,biasAt:M},0),.1);                                                   // 時鐘倒退不會放大
+  assert.equal(effBias({bias:.1},123),.1);assert.equal(effBias({},5),0);                            // 舊資料沒有 biasAt → 不衰減
+  assert.ok(near(effBias({bias:effBias(hi,M),biasAt:M},2*M),effBias(hi,2*M)));                       // 分段衰減＝一次衰減（和排程間隔無關）
 });

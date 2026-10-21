@@ -85,15 +85,23 @@ async function act(name,data){
   catch(e){if(/授權失效/.test(e.message)){token=null;}say(e.message);return null;}
   finally{busy=false;render();}
 }
+const REL={direct:"直接相關",strong:"高度相關",weak:"勉強相關",none:"無關"};
 async function inject(id){
   if(!token&&!isDev)return say("投入造物需要先連結《無限煉製》帳號（買賣與銀行不用）");
   const typed=isDev?devText.trim():"",itemName=typed||item?.name;
   if(!itemName)return say(isDev?"請選擇造物，或在上方輸入造物名稱":"請先選擇要投入的造物");
   if(!S.getItem("gk")){say("請先到右上角 ⚙ 設定 Google API Key");$("settings").showModal?.();return;}
   const r=await act("inject",{stockId:id,itemName,geminiKey:S.getItem("gk")});
-  if(r){item=null;say(`${r.score}分：${r.reason}｜${stocks[id]?.name||""}的上漲機率現在是 ${r.up}%（價格每 2 分鐘更新一次）`);render();}
+  if(r){item=null;say(`相似度 ${r.score}${REL[r.relation]?"（"+REL[r.relation]+"）":""}：${r.reason}｜${r.pass?`超過門檻 ${r.threshold}，提高`:`沒超過門檻 ${r.threshold}，降低`}${stocks[id]?.name||""}的上漲機率，現在是 ${r.up}%`);render();}
 }
 const trade=async(id,dir)=>{const r=await act("trade",{stockId:id,dir});if(r)say(`已${dir>0?"買入":"賣出"} 1 股${stocks[id]?.name||""}`);};
+const DECAY_MS=3e5,DECAY=.9;   // 機率提升每 5 分鐘只剩 90%（須與伺服器 worker/src/logic.js 一致）
+const effBiasClient=s=>{const b=s.bias||0;if(!b)return 0;const e=b*Math.pow(DECAY,Math.max(0,Date.now()-(s.biasAt??Date.now()))/DECAY_MS);return Math.abs(e)<.005?0:e;};
+const upPct=s=>Math.round(Math.min(.9,Math.max(.1,.5+effBiasClient(s)))*100);
+function refreshGauges(){   // 兩次行情更新之間，機率條也會慢慢回到 50%
+  document.querySelectorAll(".gi").forEach(i=>{const s=stocks[i.dataset.id];if(s)i.style.width=upPct(s)+"%";});
+  document.querySelectorAll(".gp").forEach(b=>{const s=stocks[b.dataset.id];if(s)b.textContent=upPct(s)+"%";});
+}
 const DAYMS=864e5,RATE=.05,MOB_LIMIT=100;
 const overAtClient=()=>{const l=me.loan;if(!l||!(l.p>0))return null;if(owedNow()<=MOB_LIMIT)return null;if(l.over!=null)return l.over;if(l.p>=MOB_LIMIT)return l.t;return l.t+DAYMS*Math.log(MOB_LIMIT/l.p)/Math.log(1+RATE);};
 const mobDueClient=()=>{const o=overAtClient();return o!=null&&Date.now()-o>=DAYMS;};
@@ -159,7 +167,7 @@ function renderMarket(){
   if(!ids.length){mk.append(el("p",{class:"mu",text:"行情載入中…"}));return;}
   for(const id of ids){
     const s=stocks[id],open=!collapsed.has(id),first=(s.p&&s.p[0])||s.price,ch=(s.price/first-1)*100,chTxt=(ch>=0?"+":"")+ch.toFixed(2)+"%";
-    const upP=Math.round(Math.min(.9,Math.max(.1,.5+(s.bias||0)))*100),n=me.hold?.[id]||0;
+    const upP=upPct(s),n=me.hold?.[id]||0;
     const w=el("section",{class:"win stock"+(open?"":" shut"),"aria-label":s.name});
     w.append(winBar(`${s.emoji} ${id.toUpperCase()}.EXE`,[
       ...(open?[]:[el("span",{class:"bt "+(ch>=0?"up":"dn"),text:`${fmt(s.price)} ${chTxt}`})]),
@@ -170,7 +178,7 @@ function renderMarket(){
     b.append(
       el("div",{class:"hd"},el("span",{class:"nm",text:s.name}),el("span",{class:"px big",text:fmt(s.price)}),el("span",{class:"chg "+(ch>=0?"up":"dn"),text:chTxt})),
       chart(s),
-      el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{style:`width:${upP}%`})),el("b",{text:upP+"%"})),
+      el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{class:"gi","data-id":id,style:`width:${upP}%`})),el("b",{class:"gp","data-id":id,text:upP+"%"})),
       el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}`}),
       el("div",{class:"acts"},
         el("button",{class:"px-btn",type:"button",disabled:busy,text:"買 1",onclick:()=>trade(id,1)}),
@@ -265,15 +273,15 @@ function wireNav(){
   $("menu").onclick=()=>dr.showModal();$("dclose").onclick=()=>dr.close();
   dr.addEventListener("click",e=>{if(e.target===dr)dr.close();});
   dr.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>{dr.close();setView(b.dataset.v);});
-  setInterval(()=>{checkMob();if(view==="bank"&&document.activeElement!==bk.amt){renderStrip();updateBank();}},5000);
+  setInterval(()=>{refreshGauges();checkMob();if(view==="bank"&&document.activeElement!==bk.amt){renderStrip();updateBank();}},5000);
 }
 function renderFeed(rows){
   const f=$("feed");f.replaceChildren();
   if(!rows.length)f.append(el("div",{class:"mu",text:"還沒有人投入造物"}));
   rows.forEach(x=>{const t=x.at?.toDate?.();const hm=t?t.toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false}):"";
     if(x.mob){f.append(el("div",{class:"mob"},document.createTextNode(`☠ ${x.who} 欠款 ${fmt(x.owed)} 拖過一天，被黑道找上門，資產清空重新開始`)));return;}
-    f.append(el("div",{class:(x.pct!=null?x.pct>0:x.score>=50)?"up":"dn"},el("span",{class:"tm",text:hm}),
-      document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：${x.score}分${x.pct!=null?"，"+(x.pct>0?"+":"")+x.pct+"%":""}${x.up!=null?"，上漲機率 "+x.up+"%":""}`)));});
+    f.append(el("div",{class:(x.pass!=null?x.pass:x.pct!=null?x.pct>0:x.score>=50)?"up":"dn"},el("span",{class:"tm",text:hm}),
+      document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：相似度 ${x.score}${x.pass!=null?(x.pass?" ✓":" ✗"):""}${x.pct!=null?"，"+(x.pct>0?"+":"")+x.pct+"%":""}${x.up!=null?"，上漲機率 "+x.up+"%":""}`)));});
 }
 function wireSettings(){
   const dlg=$("settings"),k=$("gkey"),upd=()=>{$("keystate").textContent=S.getItem("gk")?"✓ 已設定（只存在這個分頁）":"尚未設定";};
