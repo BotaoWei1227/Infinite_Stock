@@ -3,8 +3,13 @@ export const DAY=864e5,MAXH=180; // 走勢圖保留最近 180 個點（每 2 分
 export const clamp=(x,a,b)=>Math.min(b,Math.max(a,x));
 const rd=n=>Math.round(n*100)/100;
 export const upProb=bias=>clamp(.5+bias,.1,.9);
-// 投入造物：相關(≥50)提高「漲」的機率，無關(<50)提高「跌」的機率；偏移上限 ±0.4（漲跌機率最多 90%/10%）
-export const nudge=(bias,score)=>clamp((bias||0)+(score>=50?(score-50)/50*.3:-(50-score)/50*.3),-.4,.4);
+// 機率偏移（bias）＝上漲機率 − 50%。人多時每個人的影響都要小，所以單次很輕、總量有上限：
+//   投入造物：相關(≥50)提高「漲」的機率，無關(<50)提高「跌」的機率，滿分/零分一次最多 ±5 個百分點
+//   買賣：每買 1 股 +1 個百分點、每賣 1 股 −1 個百分點（買賣壓力）
+//   所有人加起來最多 ±15 個百分點（上漲機率 35%–65%），並隨時間衰減（每 2 分鐘 ×0.92）
+export const INJECT_MAX=.05,BIAS_CAP=.15,TRADE_NUDGE=.01;
+export const nudge=(bias,score)=>clamp((bias||0)+(score>=50?(score-50)/50:-(50-score)/50)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
+export const tradeNudge=(bias,dir)=>clamp((bias||0)+dir*TRADE_NUDGE,-BIAS_CAP,BIAS_CAP);
 // 行情走一步：方向隨機（上漲機率 = .5+bias），幅度 0.3–1.5%，加微弱均值回歸避免漂離基準價；偏移每步衰減 8%
 export function step(s,r1,r2,now,last){
   const bias=s.bias||0,up=r1<upProb(bias),mag=.003+r2*.012,pull=.01*Math.log(s.base/s.price);

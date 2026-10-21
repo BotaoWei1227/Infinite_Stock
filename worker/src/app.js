@@ -75,13 +75,13 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
     if(cool(p))throw new HttpError(429,"resource-exhausted","投入太頻繁，請稍候幾秒");
     if(!dev&&L.usedRecent(p?.data.used,itemName,d.now()))throw new HttpError(409,"failed-precondition","這個造物今天已經投入過了（每個造物每天限一次）");
     const bias=L.nudge(s.bias,j.score),up=Math.round(L.upProb(bias)*100);
-    const next=L.step({...s,bias},d.rand(),d.rand(),d.now(),`${itemName}（${j.score}分）`); // 只改變機率，再隨機走一步
-    const pct=Math.round((next.price/s.price-1)*1000)/10,who=dev?(a.name||"開發者"):(me.workshopName||a.name||"無名工坊");
+    const next={...s,bias,last:`${itemName}（${j.score}分）`};   // 只改變上漲機率；價格由排程隨機走，投入當下不會跳動
+    const who=dev?(a.name||"開發者"):(me.workshopName||a.name||"無名工坊");
     await d.db.commit([
       {path:MP,data:{stocks:{...stocks,[stockId]:next}},ts:["updatedAt"],pre:m.version},
       {path:pid,data:{...(p?{}:{cash:START,hold:{}}),name:who,lastInjectAt:d.now(),...(dev?{}:{used:L.markUsed(p?.data.used,itemName,d.now())})},pre:p?p.version:null},
-      {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:itemName,score:j.score,reason:j.reason,pct,up,...(dev?{dev:true}:{})},ts:["at"],pre:null}]);
-    return {...j,pct,price:next.price,up};
+      {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:itemName,score:j.score,reason:j.reason,up,...(dev?{dev:true}:{})},ts:["at"],pre:null}]);
+    return {...j,price:s.price,up};
   });
 }
 // 買賣：只需要 Google 登入，不需要連結 IA
@@ -95,7 +95,10 @@ async function trade(d,a,{stockId,dir}={}){
     if(!s)throw new HttpError(404,"not-found","找不到這檔股票");
     let r;try{r=L.trade(p?p.data:{cash:START,hold:{}},stockId,s.price,dir);}
     catch(e){throw new HttpError(409,"failed-precondition",e.message);}
-    await d.db.commit([{path:pid,data:{...(p?{}:{name:a.name||"玩家"}),cash:r.cash,hold:r.hold},pre:p?p.version:null}]);
+    const stocks={...m.data.stocks,[stockId]:{...s,bias:L.tradeNudge(s.bias,dir)}};   // 買進推升、賣出壓低上漲機率（買賣壓力）；不直接改價格，避免買賣套利
+    await d.db.commit([
+      {path:MP,data:{stocks},ts:["updatedAt"],pre:m.version},
+      {path:pid,data:{...(p?{}:{name:a.name||"玩家"}),cash:r.cash,hold:r.hold},pre:p?p.version:null}]);
     return {ok:true};
   });
 }

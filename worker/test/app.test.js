@@ -22,25 +22,25 @@ test("市場初始化（只做一次）",async()=>{
   const {call,db}=mk();await call("/ensure-market");await call("/ensure-market");
   assert.equal(Object.keys(MS(db)).length,6);assert.equal(MS(db).fire.t.length,1);
 });
-test("投入：只改變機率並走一步；玩家(以 Google uid 為鍵)/動態/綁定一次寫好，CORS 正確",async()=>{
+test("投入：只改變機率、價格不跳動；玩家(以 Google uid 為鍵)/動態/綁定一次寫好，CORS 正確",async()=>{
   const {call,db}=mk();await call("/ensure-market");
   const r=await call("/inject",inj());
-  assert.equal(r.status,200);assert.equal(r.body.score,90);assert.equal(r.body.up,74);assert.equal(r.body.price,12.11);assert.ok(r.body.pct>0);
+  assert.equal(r.status,200);assert.equal(r.body.score,90);assert.equal(r.body.up,54);assert.equal(r.body.price,12);
   assert.equal(r.h.get("Access-Control-Allow-Origin"),"https://u.github.io");
-  const f=MS(db).fire;assert.ok(Math.abs(f.bias-.2208)<1e-9);assert.deepEqual(f.p,[12,12.11]);assert.equal(f.last,"火（90分）");
+  const f=MS(db).fire;assert.ok(Math.abs(f.bias-.04)<1e-9);assert.deepEqual(f.p,[12]);assert.equal(f.t.length,1);assert.equal(f.last,"火（90分）");   // 沒有新的價格點
   assert.equal(MS(db).water.price,10);
   assert.equal(P(db).name,"測試工坊");assert.equal(P(db).cash,50);assert.deepEqual(P(db).hold,{});assert.ok(typeof P(db).used["火"]==="number");
-  assert.equal(feeds(db)[0].up,74);assert.equal(feeds(db)[0].stock,"火");
+  assert.equal(feeds(db)[0].up,54);assert.equal("pct" in feeds(db)[0],false);assert.equal(feeds(db)[0].stock,"火");
   assert.equal(db.m.get("links/g1").data.iaId,"iau_1");assert.equal(db.m.get("iaLinks/iau_1").data.uid,"g1");
 });
 test("無關造物提高下跌機率",async()=>{
   const {call,db}=mk({judge:async()=>({score:10,reason:"無關"})});await call("/ensure-market");
-  const r=await call("/inject",inj());assert.equal(r.body.up,26);assert.ok(MS(db).fire.bias<0);
+  const r=await call("/inject",inj());assert.equal(r.body.up,46);assert.ok(MS(db).fire.bias<0);
 });
 test("排程：每檔隨機走一步，偏移衰減；衝突會重試；缺市場時會建立",async()=>{
   const {call,db,d}=mk();await call("/ensure-market");await call("/inject",inj());
   await tick(d);
-  const f=MS(db).fire;assert.equal(f.t.length,3);assert.ok(Math.abs(f.bias-.2208*.92)<1e-9);assert.equal(MS(db).water.t.length,2);
+  const f=MS(db).fire;assert.equal(f.t.length,2);assert.ok(Math.abs(f.bias-.04*.92)<1e-9);assert.equal(MS(db).water.t.length,2);
   db.failNext=2;await tick(d);assert.equal(MS(db).water.t.length,3);
   const e=mk();await tick(e.d);assert.equal(Object.keys(MS(e.db)).length,6);
 });
@@ -163,4 +163,21 @@ test("開發者判斷：信箱未驗證、不在名單、名單為空、大小�
   const d2=mk({devEmails:[DEV]});d2.state.email=DEV;d2.state.emailVerified=true;
   assert.equal((await d2.call("/whoami")).body.dev,true);assert.equal((await b.call("/whoami")).body.dev,false);assert.equal((await a.call("/whoami")).body.dev,false);
   a.state.provider="anonymous";assert.equal((await a.call("/whoami")).status,401);
+});
+
+test("買賣會推動走勢：買進推升、賣出壓低上漲機率；有上限；失敗的交易不影響；不直接改價格",async()=>{
+  const {call,db}=mk();await call("/ensure-market");
+  await call("/trade",TR());assert.ok(Math.abs(MS(db).fire.bias-.01)<1e-9);assert.equal(MS(db).fire.price,12);assert.equal(MS(db).fire.p.length,1);
+  await call("/trade",TR({dir:-1}));assert.ok(Math.abs(MS(db).fire.bias)<1e-9);
+  assert.equal((await call("/trade",TR({dir:-1}))).status,409);assert.ok(Math.abs(MS(db).fire.bias)<1e-9);          // 沒持股賣不出去，不算
+  await call("/trade",TR({stockId:"water"}));assert.ok(Math.abs(MS(db).water.bias-.01)<1e-9);assert.ok(Math.abs(MS(db).fire.bias)<1e-9);   // 只影響該檔
+  await call("/bank",BK({action:"borrow",amount:1000}));
+  for(let i=0;i<20;i++)await call("/trade",TR());assert.equal(MS(db).fire.bias,.15);                           // 買再多也只到 65%
+  // 買賣沒有套利：連續買進再賣出，現金只會因為價格不變而回到原點（沒有憑空賺到的價差）
+  const {call:c2,db:d2}=mk();await c2("/ensure-market");const cash0=50;await c2("/trade",TR());await c2("/trade",TR({dir:-1}));assert.equal(d2.m.get("players/g1").data.cash,cash0);
+});
+test("多人同時買賣會疊加但被上限擋住，且彼此不互相覆蓋",async()=>{
+  const A=mk(),db=A.db;await A.call("/ensure-market");
+  for(const [uid,name] of [["g1","甲"],["g2","乙"],["g3","丙"]]){A.state.uid=uid;A.state.name=name;await A.call("/trade",TR());}
+  assert.ok(Math.abs(MS(db).fire.bias-.03)<1e-9);assert.equal(["g1","g2","g3"].every(u=>db.m.get("players/"+u).data.hold.fire===1),true);
 });

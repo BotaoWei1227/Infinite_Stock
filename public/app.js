@@ -91,7 +91,7 @@ async function inject(id){
   if(!itemName)return say(isDev?"請選擇造物，或在上方輸入造物名稱":"請先選擇要投入的造物");
   if(!S.getItem("gk")){say("請先到右上角 ⚙ 設定 Google API Key");$("settings").showModal?.();return;}
   const r=await act("inject",{stockId:id,itemName,geminiKey:S.getItem("gk")});
-  if(r){item=null;say(`${r.score}分：${r.reason}｜上漲機率 ${r.up}%，本次 ${r.pct>0?"+":""}${r.pct}%`);render();}
+  if(r){item=null;say(`${r.score}分：${r.reason}｜${stocks[id]?.name||""}的上漲機率現在是 ${r.up}%（價格每 2 分鐘更新一次）`);render();}
 }
 const trade=async(id,dir)=>{const r=await act("trade",{stockId:id,dir});if(r)say(`已${dir>0?"買入":"賣出"} 1 股${stocks[id]?.name||""}`);};
 const DAYMS=864e5,RATE=.05,MOB_LIMIT=100;
@@ -272,8 +272,8 @@ function renderFeed(rows){
   if(!rows.length)f.append(el("div",{class:"mu",text:"還沒有人投入造物"}));
   rows.forEach(x=>{const t=x.at?.toDate?.();const hm=t?t.toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false}):"";
     if(x.mob){f.append(el("div",{class:"mob"},document.createTextNode(`☠ ${x.who} 欠款 ${fmt(x.owed)} 拖過一天，被黑道找上門，資產清空重新開始`)));return;}
-    f.append(el("div",{class:x.pct>0?"up":"dn"},el("span",{class:"tm",text:hm}),
-      document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：${x.score}分，${x.pct>0?"+":""}${x.pct}%${x.up!=null?"（上漲機率 "+x.up+"%）":""}`)));});
+    f.append(el("div",{class:(x.pct!=null?x.pct>0:x.score>=50)?"up":"dn"},el("span",{class:"tm",text:hm}),
+      document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：${x.score}分${x.pct!=null?"，"+(x.pct>0?"+":"")+x.pct+"%":""}${x.up!=null?"，上漲機率 "+x.up+"%":""}`)));});
 }
 function wireSettings(){
   const dlg=$("settings"),k=$("gkey"),upd=()=>{$("keystate").textContent=S.getItem("gk")?"✓ 已設定（只存在這個分頁）":"尚未設定";};

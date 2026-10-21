@@ -1,11 +1,14 @@
 import test from "node:test";import assert from "node:assert";
-import {upProb,nudge,step,trade,recent,DAY,MAXH} from "../src/logic.js";
+import {upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,TRADE_NUDGE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
 const near=(a,b,e=1e-9)=>Math.abs(a-b)<e;
 const S=(o={})=>({price:12,base:12,bias:0,t:[0],p:[12],...o});
-test("偏移：相關→漲機率提高、無關→跌機率提高、上限 ±0.4",()=>{
-  assert.ok(near(nudge(0,100),.3));assert.ok(near(nudge(0,0),-.3));assert.equal(nudge(0,50),0);
-  assert.equal(nudge(.3,100),.4);assert.equal(nudge(-.3,0),-.4);
+test("偏移：單次很輕、總量有上限；投入與買賣方向正確",()=>{
+  assert.ok(near(nudge(0,100),.05));assert.ok(near(nudge(0,0),-.05));assert.equal(nudge(0,50),0);assert.ok(near(nudge(0,90),.04));
+  assert.equal(nudge(.14,100),.15);assert.equal(nudge(-.14,0),-.15);                      // 上限 ±15 個百分點
+  assert.ok(near(tradeNudge(0,1),.01));assert.ok(near(tradeNudge(0,-1),-.01));assert.equal(tradeNudge(.15,1),.15);assert.equal(tradeNudge(-.15,-1),-.15);
   assert.ok(near(upProb(.3),.8));assert.equal(upProb(.4),.9);assert.equal(upProb(-.4),.1);
+  assert.equal(INJECT_MAX,.05);assert.equal(BIAS_CAP,.15);assert.equal(TRADE_NUDGE,.01);
+  let b=0;for(let i=0;i<100;i++)b=nudge(b,100);assert.equal(b,.15);                      // 100 個人狂投也只到 65%
 });
 test("走一步：機率決定方向，幅度 0.3–1.5%",()=>{
   assert.equal(step(S(),.4,.5,1).price,12.11);   // r1<0.5 → 漲
