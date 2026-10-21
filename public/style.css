@@ -1,7 +1,7 @@
 :root{--bg:#0a0f1f;--panel:#0e1530;--line:#2f3f7a;--cyan:#4de2ff;--mag:#ff4fd8;--amber:#ffcf5a;--tx:#e8eeff;--mu:#93a3d6;--up:#ff5d6c;--dn:#34e0a1;--sh:#04060e}
 *{box-sizing:border-box}
 html{color-scheme:dark}
-body{margin:0 auto;max-width:720px;background:var(--bg);color:var(--tx);
+body{zoom:var(--zoom,1);margin:0 auto;max-width:720px;background:var(--bg);color:var(--tx);
   font:15px/1.6 "DotGothic16","Noto Sans TC","PingFang TC","Microsoft JhengHei",system-ui,sans-serif;
   padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left));
   background-image:linear-gradient(rgba(77,226,255,.06) 1px,transparent 1px),linear-gradient(90deg,rgba(77,226,255,.06) 1px,transparent 1px);background-size:24px 24px}
@@ -69,3 +69,20 @@ dialog.win{padding:0;color:var(--tx);width:calc(100% - 24px);max-width:440px;mar
 dialog.win::backdrop{background:rgba(3,5,12,.82)}
 @media (min-width:520px){.logo{font-size:20px}}
 @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+
+/* 選單抽屜 / 分頁 / 銀行 / 設定 */
+[hidden]{display:none!important}
+dialog.win.drawer{margin:0;inset:0 auto 0 0;height:100%;max-height:100%;width:min(300px,86vw);max-width:none;border-width:0 2px 0 0;box-shadow:4px 0 0 var(--sh)}
+.nav{display:flex;flex-direction:column;gap:10px;padding-top:14px}
+.nav-item{display:flex;align-items:center;gap:8px;width:100%;text-align:left;font:inherit;font-size:17px;color:var(--tx);background:#111a45;border:2px solid var(--line);box-shadow:3px 3px 0 var(--sh);padding:12px 14px;min-height:52px;cursor:pointer;border-radius:0}
+.nav-item[aria-current="page"]{border-color:var(--amber);color:var(--amber);background:#1b2350}
+.nav-item:active{transform:translate(2px,2px);box-shadow:1px 1px 0 var(--sh)}
+.top .logo{flex:1;text-align:center}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin:8px 0}
+.cell{background:#070b18;border:2px solid var(--line);padding:8px 10px}.cell .k{display:block;font-size:12px;color:var(--mu)}
+.cell b{font-family:"Press Start 2P",monospace;font-size:13px;color:var(--amber);word-break:break-all}.cell.debt b{color:var(--up)}
+.seg{display:flex;gap:8px;margin:8px 0}.seg .px-btn{flex:1}
+.seg .px-btn[aria-pressed="true"]{background:var(--amber);color:#1b1400;border-color:#fff3c4}
+.list{margin:6px 0;padding:0;list-style:none}.list li{display:flex;justify-content:space-between;gap:8px;padding:6px 0;border-bottom:1px dashed var(--line)}
+.list li:last-child{border-bottom:0}.list .off{color:var(--mu);text-decoration:line-through}
+.warn{border-left:3px solid var(--up);padding-left:8px;font-size:13px;color:var(--mu);margin:8px 0}

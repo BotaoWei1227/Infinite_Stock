@@ -79,17 +79,32 @@ async function trade(d,uid,{stockId,dir,iaToken}={}){
     return {ok:true};
   });
 }
+async function bank(d,uid,{action,amount,all,iaToken}={}){
+  if(action!=="borrow"&&action!=="repay")throw bad("參數錯誤");
+  const a=Math.round(Number(amount)*100)/100,full=action==="repay"&&all===true;
+  if(!full&&!(Number.isFinite(a)&&a>=.01&&a<=L.DEBT_CAP))throw bad(`金額不正確（0.01–${L.DEBT_CAP}）`);
+  const me=await d.ia.me(iaToken);
+  await retry(()=>ensureBind(d,uid,me.id));
+  const pid=`players/${me.id}`;
+  return retry(async()=>{
+    const p=await d.db.get(pid),now=d.now();
+    let r;try{r=action==="borrow"?L.borrow(p?p.data:{cash:START},a,now):L.repay(p?p.data:{cash:START},a,now,full);}
+    catch(e){throw new HttpError(409,"failed-precondition",e.message);}
+    await d.db.commit([{path:pid,data:{...(p?{}:{hold:{}}),name:me.workshopName||"無名工坊",cash:r.cash,loan:r.loan},pre:p?p.version:null}]);
+    return {ok:true,cash:r.cash,owed:Math.round(L.owed(r.loan,now)*100)/100};
+  });
+}
 export async function route(req,env,d){
   if(req.method==="OPTIONS")return new Response(null,{status:204,headers:cors(env)});
   const path=new URL(req.url).pathname;
   try{
     if(req.method!=="POST")throw new HttpError(405,"invalid-argument","方法不允許");
     if(path==="/ensure-market")return out(env,200,await ensureMarket(d));
-    if(path==="/inject"||path==="/trade"){
+    if(path==="/inject"||path==="/trade"||path==="/bank"){
       const a=await d.verify(req);
       if(a.provider!=="google.com")throw new HttpError(401,"unauthenticated","請先以 Google 帳號登入");
       let body;try{body=await req.json();}catch{throw bad("請求格式錯誤");}
-      return out(env,200,await (path==="/inject"?inject:trade)(d,a.uid,body));
+      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:trade)(d,a.uid,body));
     }
     throw new HttpError(404,"not-found","找不到");
   }catch(e){

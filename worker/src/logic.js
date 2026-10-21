@@ -31,3 +31,20 @@ export function recent(items,now){
 // 每個造物每 24 小時只能投入一次（玩家文件的 used：造物名 → 投入時間）
 export const usedRecent=(u,name,now)=>{const t=(u||{})[name];return typeof t==="number"&&now-t<DAY&&t<=now+60000;};
 export const markUsed=(u,name,now)=>({...Object.fromEntries(Object.entries(u||{}).filter(([,t])=>typeof t==="number"&&now-t<DAY)),[name]:now});
+
+// ---- 銀行（高利貸）：利率 5% / 24 小時，按時間連續複利；借款上限 100
+export const RATE=.05,DEBT_CAP=100;
+const cents=n=>Math.round(n*100)/100;
+export const owed=(loan,now)=>loan&&loan.p>0?loan.p*Math.pow(1+RATE,Math.max(0,now-loan.t)/DAY):0;
+export function borrow(d,amount,now){
+  const o=owed(d.loan,now);
+  if(o+amount>DEBT_CAP+1e-9)throw new Error(`超過借款上限（欠款加新借款不能超過 ${DEBT_CAP}）`);
+  return {cash:cents(d.cash+amount),loan:{p:cents(o+amount),t:now}};
+}
+export function repay(d,amount,now,all){
+  const o=owed(d.loan,now);
+  if(o<.005)throw new Error("目前沒有欠款");
+  const full=all||amount>=o,pay=full?Math.ceil(o*100-1e-9)/100:amount;
+  if(d.cash+1e-9<pay)throw new Error("現金不足");
+  return {cash:cents(d.cash-pay),loan:{p:full?0:cents(o-pay),t:now}};
+}

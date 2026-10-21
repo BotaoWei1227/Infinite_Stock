@@ -45,3 +45,20 @@ test("每個造物每 24 小時限一次，過期自動清掉",()=>{
   assert.equal(usedRecent({火:now-h},"火",now),true);assert.equal(usedRecent({火:now-DAY},"火",now),false);assert.equal(usedRecent({},"火",now),false);assert.equal(usedRecent(undefined,"火",now),false);
   assert.deepEqual(markUsed({水:now-25*h,雷:now-h},"火",now),{雷:now-h,火:now});
 });
+
+import {owed,borrow,repay,DEBT_CAP,RATE} from "../src/logic.js";
+test("銀行：5%/24 小時複利、借款上限、部分/全額還款",()=>{
+  const t0=1e13;
+  assert.equal(owed(undefined,t0),0);assert.equal(owed({p:0,t:t0},t0),0);
+  assert.ok(near(owed({p:50,t:t0},t0+DAY),52.5));assert.ok(near(owed({p:100,t:t0},t0+2*DAY),110.25));
+  assert.ok(near(owed({p:50,t:t0},t0+DAY/2),50*Math.sqrt(1.05)));
+  let r=borrow({cash:50},50,t0);assert.deepEqual(r,{cash:100,loan:{p:50,t:t0}});
+  assert.throws(()=>borrow({cash:50,loan:{p:60,t:t0}},50,t0),/上限/);
+  assert.equal(DEBT_CAP,100);assert.equal(RATE,.05);
+  const d={cash:100,loan:{p:50,t:t0}};
+  r=repay(d,20,t0+DAY,false);assert.equal(r.cash,80);assert.ok(near(r.loan.p,32.5));
+  r=repay(d,0,t0+DAY,true);assert.equal(r.cash,47.5);assert.equal(r.loan.p,0);
+  r=repay(d,999,t0+DAY,false);assert.equal(r.loan.p,0);              // 超額還款視為全額
+  assert.throws(()=>repay({cash:10,loan:{p:50,t:t0}},0,t0,true),/現金不足/);
+  assert.throws(()=>repay({cash:10},5,t0,false),/沒有欠款/);
+});

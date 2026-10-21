@@ -8,7 +8,7 @@ const $=id=>document.getElementById(id),S=sessionStorage;
 const fmt=n=>(Math.round(n*100)/100).toFixed(2);
 let hinting=true;
 const say=t=>{hinting=false;$("msg").textContent=t;};
-let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set();
+let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false;
 
 // ---------- OAuth：Authorization Code + PKCE S256（瀏覽器端） ----------
 const b64u=b=>btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
@@ -95,9 +95,12 @@ async function inject(id){
   if(r){item=null;say(`${r.score}分：${r.reason}｜上漲機率 ${r.up}%，本次 ${r.pct>0?"+":""}${r.pct}%`);render();}
 }
 const trade=(id,dir)=>act("trade",{stockId:id,dir});
-const net=()=>me.cash+Object.entries(me.hold||{}).reduce((a,[k,n])=>a+n*(stocks[k]?.price||0),0);
+const DAYMS=864e5,RATE=.05,DEBT_CAP=100;
+const owedNow=()=>{const l=me.loan;return l&&l.p>0?l.p*Math.pow(1+RATE,Math.max(0,Date.now()-l.t)/DAYMS):0;};
+const net=()=>me.cash+Object.entries(me.hold||{}).reduce((a,[k,n])=>a+n*(stocks[k]?.price||0),0)-owedNow();
+const bankAct=async(action,amount,all)=>{const r=await act("bank",{action,amount,all});
+  if(r){say(action==="borrow"?`已借入 ${fmt(amount)}，目前欠款 ${fmt(r.owed)}`:(r.owed>0?`已還款，剩餘欠款 ${fmt(r.owed)}`:"已全額還清，沒有欠款了"));}return r;};
 
-// ---------- 畫面（像素 × 電腦視窗） ----------
 const winBar=(title,extra)=>el("div",{class:"bar"},el("span",{class:"tt",text:title}),...(extra||[]));
 function chart(s){ // 像素折線圖：紅漲綠跌，標示最高/最低與涵蓋時間
   const pts=s.p||[s.price],n=pts.length;
@@ -165,9 +168,90 @@ function renderMarket(){
     w.append(b);mk.append(w);
   }
 }
+
+// ---------- 銀行 ----------
+const bk={};
+function buildBank(){
+  const v=$("v-bank");v.replaceChildren();
+  const w=el("section",{class:"win","aria-label":"銀行"});
+  w.append(winBar("🏦 BANK.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
+  const b=el("div",{class:"body"});
+  const hr=((Math.pow(1+RATE,1/24)-1)*100).toFixed(2);
+  bk.owed=el("b");bk.cash=el("b");bk.room=el("b");bk.next=el("b");
+  bk.amt=el("input",{class:"px-in",type:"number",inputmode:"decimal",min:"0.01",step:"0.01",placeholder:"金額",id:"bamt","aria-label":"金額"});
+  bk.b1=el("button",{class:"px-btn pri",type:"button",text:"借款",onclick:()=>{const a=parseFloat(bk.amt.value);if(!(a>0))return say("請輸入金額");bankAct("borrow",a).then(r=>{if(r)bk.amt.value="";});}});
+  bk.b2=el("button",{class:"px-btn",type:"button",text:"還款",onclick:()=>{const a=parseFloat(bk.amt.value);if(!(a>0))return say("請輸入金額");bankAct("repay",a).then(r=>{if(r)bk.amt.value="";});}});
+  bk.b3=el("button",{class:"px-btn",type:"button",text:"全額還清",onclick:()=>bankAct("repay",0,true)});
+  b.append(
+    el("p",{class:"mu",text:`高利貸：利率 5%／24 小時（約每小時 ${hr}%，利息持續複利累計）。欠款上限 ${DEBT_CAP}。`}),
+    el("div",{class:"grid"},
+      el("div",{class:"cell debt"},el("span",{class:"k",text:"目前欠款"}),bk.owed),el("div",{class:"cell"},el("span",{class:"k",text:"現金"}),bk.cash),
+      el("div",{class:"cell"},el("span",{class:"k",text:"還能再借"}),bk.room),el("div",{class:"cell debt"},el("span",{class:"k",text:"24 小時後欠款"}),bk.next)),
+    el("label",{class:"lbl",for:"bamt",text:"金額"}),bk.amt,el("div",{class:"row"},bk.b1,bk.b2,bk.b3),
+    el("p",{class:"warn",text:"欠款會從淨值扣掉，不還的話利息會一直滾。借來的錢可以拿去買股票，但股價可能跌。"}));
+  w.append(b);v.append(w);bankBuilt=true;
+}
+function updateBank(){
+  if(!bankBuilt)buildBank();
+  const o=owedNow();bk.owed.textContent=fmt(o);bk.cash.textContent=fmt(me.cash);
+  bk.room.textContent=fmt(Math.max(0,DEBT_CAP-o));bk.next.textContent=fmt(o*(1+RATE));
+  bk.b1.disabled=bk.b2.disabled=bk.b3.disabled=busy;bk.b2.disabled=busy||o<.005;bk.b3.disabled=busy||o<.005;
+}
+// ---------- 練金工坊 ----------
+function renderWork(){
+  const v=$("v-work");v.replaceChildren();
+  const w=el("section",{class:"win","aria-label":"練金工坊"});
+  w.append(winBar("⚗ WORKSHOP.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
+  const b=el("div",{class:"body"});
+  b.append(el("p",{class:"warn",text:"《無限煉製》的公開 API 目前只開放讀取（個人資料、背包、合成紀錄），沒有「代為合成」的功能，所以這裡還不能替你在遊戲裡煉成。代煉功能的做法待定。"}));
+  b.append(el("h2",{class:"h2",text:"你 24 小時內做出的造物"}));
+  if(!token)b.append(el("p",{class:"mu",text:"連結《無限煉製》帳號後，這裡會列出你做出的造物，以及哪些還能投入股票。"}));
+  else if(!inv.length)b.append(el("p",{class:"mu",text:"24 小時內沒有新做出的造物。到遊戲裡煉成新東西吧！"}));
+  else{const ul=el("ul",{class:"list"});
+    inv.forEach(x=>{const u=usedAt(x.name);ul.append(el("li",{},el("span",{class:u?"off":"",text:x.name}),el("span",{class:"mu",text:u?"今日已投入":"剩 "+left(x.at)+"・可投入"})));});
+    b.append(ul);}
+  w.append(b);v.append(w);
+}
+// ---------- 設定（介面大小） ----------
+const SCALES={s:["小",.9],m:["中",1],l:["大",1.2]};
+let scaleKey="m";
+try{const k=localStorage.getItem("ui");if(SCALES[k])scaleKey=k;}catch{}
+const applyScale=()=>document.documentElement.style.setProperty("--zoom",String(SCALES[scaleKey][1]));
+function renderSet(){
+  const v=$("v-set");v.replaceChildren();
+  const w=el("section",{class:"win","aria-label":"設定"});
+  w.append(winBar("⚙ SETTINGS.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
+  const seg=el("div",{class:"seg",role:"group","aria-label":"介面大小"});
+  Object.entries(SCALES).forEach(([k,[name]])=>seg.append(el("button",{class:"px-btn",type:"button","aria-pressed":String(k===scaleKey),text:name,
+    onclick:()=>{scaleKey=k;try{localStorage.setItem("ui",k);}catch{}applyScale();renderSet();}})));
+  w.append(el("div",{class:"body"},el("h2",{class:"h2",text:"介面大小"}),seg,
+    el("h2",{class:"h2",text:"Google API Key"}),el("p",{class:"mu",text:"AI 判定造物時使用你自己的 Key；也可以按右上角的 ⚙。"}),
+    el("button",{class:"px-btn",type:"button",text:"開啟 API 設定",onclick:()=>$("settings").showModal()})));
+  v.append(w);
+}
+// ---------- 分頁 ----------
+const VIEWS={trade:"v-trade",bank:"v-bank",work:"v-work",set:"v-set"},HASH={trade:"",bank:"#bank",work:"#work",set:"#settings"};
+function setView(v){
+  if(!VIEWS[v])v="trade";view=v;
+  for(const [k,id] of Object.entries(VIEWS))$(id).hidden=k!==v;
+  document.querySelectorAll(".nav-item").forEach(b=>{if(b.dataset.v===v)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current");});
+  try{history.replaceState(null,"",location.pathname+location.search+HASH[v]);}catch{}
+  render();window.scrollTo(0,0);
+}
 function render(){
-  if(hinting)$("msg").textContent=!user?"請先登入 Google，並連結《無限煉製》帳號":!token?"再連結《無限煉製》帳號，就能投入造物":"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」";
-  renderStrip();renderCraft();renderMarket();
+  if(hinting)$("msg").textContent=!user?"請先登入 Google，並連結《無限煉製》帳號":!token?"再連結《無限煉製》帳號，就能投入造物與使用銀行":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」":"";
+  renderStrip();
+  if(view==="trade"){renderCraft();renderMarket();}
+  else if(view==="bank")updateBank();
+  else if(view==="work")renderWork();
+  else renderSet();
+}
+function wireNav(){
+  const dr=$("drawer");
+  $("menu").onclick=()=>dr.showModal();$("dclose").onclick=()=>dr.close();
+  dr.addEventListener("click",e=>{if(e.target===dr)dr.close();});
+  dr.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>{dr.close();setView(b.dataset.v);});
+  setInterval(()=>{if(view==="bank"&&document.activeElement!==bk.amt){renderStrip();updateBank();}},5000);
 }
 function renderFeed(rows){
   const f=$("feed");f.replaceChildren();
@@ -188,7 +272,8 @@ function wireSettings(){
 
 // ---------- 啟動 ----------
 async function main(){
-  wireSettings();render();
+  applyScale();wireSettings();wireNav();
+  setView({"#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
   if([CFG.firebase.apiKey,CFG.ia.clientId,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase、Client ID 與 Worker 網址");return;}
   const app=initializeApp(CFG.firebase);db=getFirestore(app);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));

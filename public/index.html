@@ -12,21 +12,38 @@
 </head>
 <body>
 <header class="top">
+  <button id="menu" class="px-btn gear" type="button" aria-label="選單" aria-haspopup="dialog">☰</button>
   <h1 class="logo px">煉金<span>交易所</span></h1>
-  <button id="gear" class="px-btn gear" type="button" aria-label="設定" aria-haspopup="dialog">⚙</button>
+  <button id="gear" class="px-btn gear" type="button" aria-label="Google API Key 設定" aria-haspopup="dialog">⚙</button>
 </header>
-<p class="note">玩家製作的非官方小遊戲，非《無限煉製》官方活動。遊戲幣無實際價值，不提供任何官方獎勵。</p>
-<p class="rule">股價會自己隨機漲跌。投入相關的造物會提高上漲機率，無關的造物則提高下跌機率，效果會慢慢消退。每個造物每天限投入一次。</p>
 <main>
   <section id="strip" class="strip" aria-label="帳號與資產"></section>
   <div id="msg" class="term" role="status" aria-live="polite">請先登入 Google，並連結《無限煉製》帳號</div>
-  <section id="craft" class="win" aria-label="選擇造物"></section>
-  <div id="market"></div>
-  <section class="win" aria-label="全服動態">
-    <div class="bar"><span class="tt">📜 LOG.EXE</span><span class="wb dec" aria-hidden="true">_</span><span class="wb dec" aria-hidden="true">×</span></div>
-    <div id="feed" class="body log"></div>
-  </section>
+
+  <div id="v-trade" class="view">
+    <p class="note">玩家製作的非官方小遊戲，非《無限煉製》官方活動。遊戲幣無實際價值，不提供任何官方獎勵。</p>
+    <p class="rule">股價會自己隨機漲跌。投入相關的造物會提高上漲機率，無關的造物則提高下跌機率，效果會慢慢消退。每個造物每天限投入一次。</p>
+    <section id="craft" class="win" aria-label="選擇造物"></section>
+    <div id="market"></div>
+    <section class="win" aria-label="全服動態">
+      <div class="bar"><span class="tt">📜 LOG.EXE</span><span class="wb dec" aria-hidden="true">_</span><span class="wb dec" aria-hidden="true">×</span></div>
+      <div id="feed" class="body log"></div>
+    </section>
+  </div>
+  <div id="v-bank" class="view" hidden></div>
+  <div id="v-work" class="view" hidden></div>
+  <div id="v-set" class="view" hidden></div>
 </main>
+
+<dialog id="drawer" class="win drawer" aria-label="選單">
+  <div class="bar"><span class="tt">☰ MENU.EXE</span><button id="dclose" class="wb" type="button" aria-label="關閉選單">×</button></div>
+  <nav class="body nav" aria-label="主選單">
+    <button class="nav-item" type="button" data-v="trade">📈 交易區</button>
+    <button class="nav-item" type="button" data-v="bank">🏦 銀行</button>
+    <button class="nav-item" type="button" data-v="work">⚗ 練金工坊</button>
+    <button class="nav-item" type="button" data-v="set">⚙ 設定</button>
+  </nav>
+</dialog>
 
 <dialog id="settings" class="win dlg" aria-labelledby="st-title">
   <div class="bar"><span class="tt" id="st-title">⚙ SETTINGS.SYS</span><button id="close" class="wb" type="button" aria-label="關閉">×</button></div>

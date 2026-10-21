@@ -88,3 +88,31 @@ test("每個造物每天限一次；24 小時後可再投入，過期紀錄會�
   t.v+=25*H2;r=await call("/inject",inj());assert.equal(r.status,200);
   assert.deepEqual(Object.keys(db.m.get("players/iau_1").data.used),["火"]);
 });
+
+const BK=(x={})=>({iaToken:"tok12345",...x});
+test("銀行：借款→利息累計→還款；欠款不被其他操作覆蓋",async()=>{
+  const {call,db,t}=mk();await call("/ensure-market");
+  let r=await call("/bank",BK({action:"borrow",amount:50}));assert.equal(r.status,200);assert.equal(r.body.cash,100);assert.equal(r.body.owed,50);
+  assert.deepEqual(db.m.get("players/iau_1").data.loan,{p:50,t:t.v});assert.deepEqual(db.m.get("players/iau_1").data.hold,{});
+  await call("/trade",{stockId:"fire",dir:1,iaToken:"tok12345"});assert.equal(db.m.get("players/iau_1").data.loan.p,50);   // 買股票不影響欠款
+  t.v+=DAYMS;r=await call("/bank",BK({action:"repay",amount:10}));assert.equal(r.status,200);assert.equal(r.body.owed,42.5);assert.equal(r.body.cash,78);
+  r=await call("/bank",BK({action:"repay",all:true}));assert.equal(r.status,200);assert.equal(r.body.owed,0);assert.equal(r.body.cash,35.5);
+  assert.equal((await call("/bank",BK({action:"repay",all:true}))).status,409);
+});
+test("銀行：上限、現金不足、金額檢查、需要登入",async()=>{
+  const {call,t,state}=mk();await call("/ensure-market");
+  assert.equal((await call("/bank",BK({action:"borrow",amount:60}))).status,200);
+  assert.equal((await call("/bank",BK({action:"borrow",amount:60}))).status,409);
+  t.v+=10*DAYMS;                                                    // 利息滾到 ≈97.7，現金 110 夠；再借會超過上限
+  assert.equal((await call("/bank",BK({action:"borrow",amount:10}))).status,409);
+  for(const bad of [0,-5,"abc",101,null])assert.equal((await call("/bank",BK({action:"borrow",amount:bad}))).status,400);
+  assert.equal((await call("/bank",BK({action:"steal",amount:5}))).status,400);
+  state.provider="anonymous";assert.equal((await call("/bank",BK({action:"borrow",amount:5}))).status,401);
+});
+test("銀行：現金不足時不能還款",async()=>{
+  const {call,t}=mk();await call("/ensure-market");
+  await call("/bank",BK({action:"borrow",amount:100}));
+  for(let i=0;i<12;i++)await call("/trade",{stockId:"steam",dir:1,iaToken:"tok12345"});   // 18×… 把現金花光
+  t.v+=3*DAYMS;const r=await call("/bank",BK({action:"repay",all:true}));assert.equal(r.status,409);assert.match(r.body.error.message,/現金不足/);
+});
+const DAYMS=864e5;
