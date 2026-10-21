@@ -23,13 +23,14 @@ export function iaClient(env,fetchFn=fetch,sleep=ms=>new Promise(s=>setTimeout(s
     }
   };
 }
-export async function judge(fetchFn,stock,item,key,model){
+// 固定使用的模型（玩家無法更改）。Google 官方目前沒有「3.6 Flash-Lite」，Flash-Lite 最新是 3.5；要換成 3.6 Flash 只需改這一行
+export const MODEL="gemini-3.5-flash-lite";
+export async function judge(fetchFn,stock,item,key){
   if(typeof key!=="string"||key.length<10||key.length>200)throw new HttpError(400,"invalid-argument","請先填入 Google API Key");
-  const m=/^[a-z0-9.\-]{3,40}$/.test(model||"")?model:"gemini-3.5-flash";
   const prompt=`你是奇幻煉金交易所的裁判。股票主題：「${stock}」。玩家投入的造物：「${item}」。判斷這個造物與該主題的關聯程度（元素、組成、象徵、常識聯想皆可），只回傳 JSON：{"score":0到100的整數,"reason":"20字內繁體中文理由"}。`;
-  const r=await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/${m}:generateContent`,{method:"POST",
+  const r=await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,{method:"POST",
     headers:{"Content-Type":"application/json","x-goog-api-key":key},
-    body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json",temperature:.2}})});
+    body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json"}})});
   if(!r.ok)throw new HttpError(412,"failed-precondition",r.status===429?"Gemini 額度用盡或請求過快":`Gemini 錯誤 ${r.status}（請確認 Key 與模型名稱）`);
   const j=await r.json();let o;
   try{o=JSON.parse((j.candidates?.[0]?.content?.parts||[]).map(p=>p.text||"").join("").replace(/```json|```/g,"").trim());}

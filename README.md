@@ -6,6 +6,16 @@
 - Firestore：客戶端唯讀（`firestore.rules`），行情與動態用 onSnapshot 即時更新；所有寫入只由 Worker 完成。`links` / `iaLinks` 是 Google ↔ 工坊一對一綁定，客戶端不可讀寫。
 - Google API Key 由玩家輸入，只放 sessionStorage，每次投入時隨請求送到 Worker 轉呼叫 Gemini；Worker 不儲存、不記錄請求內容。
 
+## 行情機制
+- 全部行情放在 Firestore 單一文件 `market/state`（價格、偏移、最近 180 個走勢點），客戶端只需監聽 1 個文件。
+- Cloudflare Cron Trigger 每 2 分鐘讓每檔股票隨機走一步（幅度 0.3–1.5%，含微弱均值回歸）。
+- 投入造物只改變上漲機率：關聯度 ≥50 提高「漲」的機率，<50 提高「跌」的機率（偏移上限 ±0.4，機率限制在 10%–90%），偏移每步衰減 8%；投入當下也會立刻走一步。
+
+## 規則與介面
+- 判定模型固定為 `gemini-3.5-flash-lite`（`worker/src/ia.js` 的 `MODEL`，玩家無法更改；要換成 `gemini-3.6-flash` 只需改那一行）。這兩個模型已停用 `temperature` 參數，請求中不要再帶。
+- 每個造物每 24 小時只能投入一次（玩家文件的 `used`），且必須是 24 小時內成功合成的。
+- 介面：每檔股票是一個像素風「電腦視窗」（可收合）；Google API Key 與判定模型收在右上角 ⚙ 設定內，並有按鈕連到 Google AI Studio 的 API Key 頁面。
+
 ## 部署（全程可在手機網頁完成）
 1. Firebase：啟用 Google 登入、建立 Firestore、發布 `firestore.rules`，授權網域加入 Worker 網址（`alchemy-exchange.<你的子網域>.workers.dev`）。
 2. Google Cloud：建立只有「Cloud Datastore User」角色的服務帳戶，下載 JSON 金鑰（不要放進 Git）。

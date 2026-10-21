@@ -33,3 +33,8 @@ test("前置條件衝突 → conflict",async()=>{
   const f=async u=>String(u).includes("oauth2")?{ok:true,json:async()=>({access_token:"T",expires_in:3600})}:{ok:false,status:400,json:async()=>({error:{status:"FAILED_PRECONDITION"}})};
   await assert.rejects(makeDb(env,f).commit([{path:"a/b",data:{x:1},pre:"t"}]),e=>e.code==="conflict"&&e.status===409);
 });
+test("陣列（走勢點）編碼/解碼來回一致",()=>{
+  const o={stocks:{fire:{name:"火",t:[1792466764845,1792466884845],p:[12,12.11],bias:0.2208}}};
+  assert.deepEqual(decode(encode(o)),o);
+  assert.deepEqual(encode([1,2.5]),{arrayValue:{values:[{integerValue:"1"},{doubleValue:2.5}]}});
+});

@@ -2,17 +2,48 @@
 <html lang="zh-Hant">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
 <title>煉金交易所</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DotGothic16&family=Press+Start+2P&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-<h1>煉金交易所</h1>
-<div class="note">玩家製作的非官方小遊戲，非《無限煉製》官方活動。遊戲幣無實際價值，不提供任何官方獎勵。</div>
-<div class="bar" id="acct"></div>
-<div class="bar row"><span>現金 <b id="cash">-</b></span><span>淨值 <b id="net">-</b></span><span class="grow"></span><span class="mu" id="msg"></span></div>
-<div id="market"></div>
-<div class="card"><b>全服動態</b><div id="feed"></div></div>
+<header class="top">
+  <h1 class="logo px">煉金<span>交易所</span></h1>
+  <button id="gear" class="px-btn gear" type="button" aria-label="設定" aria-haspopup="dialog">⚙</button>
+</header>
+<p class="note">玩家製作的非官方小遊戲，非《無限煉製》官方活動。遊戲幣無實際價值，不提供任何官方獎勵。</p>
+<p class="rule">股價會自己隨機漲跌。投入相關的造物會提高上漲機率，無關的造物則提高下跌機率，效果會慢慢消退。每個造物每天限投入一次。</p>
+<main>
+  <section id="strip" class="strip" aria-label="帳號與資產"></section>
+  <div id="msg" class="term" role="status" aria-live="polite">請先登入 Google，並連結《無限煉製》帳號</div>
+  <section id="craft" class="win" aria-label="選擇造物"></section>
+  <div id="market"></div>
+  <section class="win" aria-label="全服動態">
+    <div class="bar"><span class="tt">📜 LOG.EXE</span><span class="wb dec" aria-hidden="true">_</span><span class="wb dec" aria-hidden="true">×</span></div>
+    <div id="feed" class="body log"></div>
+  </section>
+</main>
+
+<dialog id="settings" class="win dlg" aria-labelledby="st-title">
+  <div class="bar"><span class="tt" id="st-title">⚙ SETTINGS.SYS</span><button id="close" class="wb" type="button" aria-label="關閉">×</button></div>
+  <div class="body">
+    <h2 class="h2">Google API Key（Gemini）</h2>
+    <p class="mu">AI 判定造物與股票的關聯度時，使用你自己的 Key。Key 只存在這個分頁，關掉就清除；每次投入時隨請求送到伺服器轉呼叫 Gemini，伺服器不儲存、不記錄。</p>
+    <label class="lbl" for="gkey">API Key</label>
+    <input id="gkey" class="px-in" type="password" autocomplete="off" spellcheck="false" placeholder="AIza…">
+    <div class="row">
+      <a class="px-btn pri" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">取得 Google API Key ↗</a>
+      <button id="clearkey" class="px-btn" type="button">清除 Key</button>
+    </div>
+    <p class="mu">狀態：<b id="keystate">尚未設定</b></p>
+    <h2 class="h2">判定模型</h2>
+    <p class="mu"><code id="model" class="px"></code>（固定，無法更改）</p>
+  </div>
+</dialog>
 <script type="module" src="app.js"></script>
 </body>
 </html>

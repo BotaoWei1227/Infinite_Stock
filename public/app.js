@@ -6,8 +6,9 @@ import {getFirestore,collection,doc,onSnapshot,query,orderBy,limit} from "https:
 const REDIRECT=location.origin+location.pathname; // 必須與 Developer Center 的 Redirect URI 完全一致
 const $=id=>document.getElementById(id),S=sessionStorage;
 const fmt=n=>(Math.round(n*100)/100).toFixed(2);
-const say=t=>{$("msg").textContent=t;};
-let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null;
+let hinting=true;
+const say=t=>{hinting=false;$("msg").textContent=t;};
+let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set();
 
 // ---------- OAuth：Authorization Code + PKCE S256（瀏覽器端） ----------
 const b64u=b=>btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
@@ -60,6 +61,10 @@ const icon=(e,url)=>{const s=document.createElement("span"),u=okUrl(url);s.textC
   if(u){const i=new Image();i.className="ic";i.alt="";i.loading="lazy";i.src=u;i.onload=()=>s.replaceChildren(i);}return s;};
 
 const left=at=>{const m=Math.max(0,Math.floor((864e5-(Date.now()-at))/6e4));return m>=60?Math.floor(m/60)+" 小時":m+" 分";};
+const usedAt=name=>{const t=(me.used||{})[name];return typeof t==="number"&&Date.now()-t<864e5?t:0;};
+const el=(tag,p={},...kids)=>{const e=document.createElement(tag);
+  for(const [k,v] of Object.entries(p)){if(k==="class")e.className=v;else if(k==="text")e.textContent=v;else if(k==="disabled"||k==="hidden")e[k]=!!v;else if(k.startsWith("on"))e[k]=v;else e.setAttribute(k,v);}
+  e.append(...kids);return e;};
 async function gLogin(){
   const p=new GoogleAuthProvider();
   try{await signInWithPopup(auth,p);}
@@ -68,7 +73,9 @@ async function gLogin(){
     if(e.code!=="auth/popup-closed-by-user"&&e.code!=="auth/cancelled-popup-request")say("Google 登入失敗："+e.code);
   }
 }
-// ---------- 伺服器端行動（Cloud Functions 驗證 IA 身分並計算漲跌） ----------
+function logoutIA(){token=null;inv=[];item=null;offP&&offP();offP=null;me={cash:CFG.startCash,hold:{},name:"訪客"};render();}
+
+// ---------- 伺服器端行動（Worker 驗證 IA 身分並計算行情） ----------
 async function act(name,data){
   if(busy)return null;if(!user){say("請先以 Google 帳號登入");return null;}if(!token){say("請先連結《無限煉製》帳號");return null;}
   busy=true;say("處理中…");render();
@@ -83,61 +90,114 @@ async function act(name,data){
 }
 async function inject(id){
   if(!item)return say("請先選擇要投入的造物");
-  const r=await act("inject",{stockId:id,itemName:item.name,geminiKey:S.getItem("gk")||"",model:S.getItem("gm")||CFG.defaultModel});
-  if(r)say(`${r.score}分：${r.reason}（${r.pct>0?"+":""}${r.pct}%）`);
+  if(!S.getItem("gk")){say("請先到右上角 ⚙ 設定 Google API Key");$("settings").showModal?.();return;}
+  const r=await act("inject",{stockId:id,itemName:item.name,geminiKey:S.getItem("gk")});
+  if(r){item=null;say(`${r.score}分：${r.reason}｜上漲機率 ${r.up}%，本次 ${r.pct>0?"+":""}${r.pct}%`);render();}
 }
 const trade=(id,dir)=>act("trade",{stockId:id,dir});
 const net=()=>me.cash+Object.entries(me.hold||{}).reduce((a,[k,n])=>a+n*(stocks[k]?.price||0),0);
 
-// ---------- 畫面 ----------
-function render(){
-  const a=$("acct");a.replaceChildren();
-  const rg=document.createElement("div");rg.className="row";rg.style.marginBottom="8px";
-  if(user){const t=document.createElement("span");t.textContent="Google："+(user.email||user.displayName||"已登入");
-    const o=document.createElement("button");o.className="g";o.textContent="登出 Google";o.onclick=()=>signOut(auth);rg.append(t,o);}
-  else{const b=document.createElement("button");b.textContent="以 Google 帳號登入";b.onclick=gLogin;rg.append(b);
-    const m=document.createElement("span");m.className="mu";m.textContent="登入後帳號會與你的工坊綁定，進度跨裝置保留";rg.append(m);}
-  const r1=document.createElement("div");r1.className="row";
-  if(token){const b=document.createElement("span");b.textContent="工坊："+me.name+"　";r1.append(b);
-    const sel=document.createElement("select");sel.setAttribute("aria-label","投入造物");
-    sel.append(new Option(inv.length?"選擇 24 小時內做出的造物":"24 小時內沒有做出新造物",""));inv.forEach((x,i)=>sel.append(new Option(x.name+"（剩 "+left(x.at)+"）",i)));
-    sel.value=item?inv.indexOf(item):"";sel.onchange=()=>{item=inv[sel.value]||null;};r1.append(sel);
-    const o=document.createElement("button");o.className="g";o.textContent="登出";o.onclick=()=>{token=null;inv=[];item=null;offP&&offP();me={cash:CFG.startCash,hold:{},name:"訪客"};render();};r1.append(o);
-  }else{const b=document.createElement("button");b.textContent="連結《無限煉製》帳號";b.onclick=login;r1.append(b);
-    const m=document.createElement("span");m.className="mu";m.textContent="用來驗證工坊身分與 24 小時內的合成紀錄（唯讀）";r1.append(m);}
-  const r2=document.createElement("div");r2.className="row";r2.style.marginTop="8px";
-  const k=document.createElement("input");k.type="password";k.placeholder="Google API Key（只存在本分頁，每次投入時傳給伺服器判定）";k.className="grow";k.value=S.getItem("gk")||"";k.onchange=()=>S.setItem("gk",k.value.trim());
-  const m=document.createElement("input");m.placeholder="模型";m.value=S.getItem("gm")||CFG.defaultModel;m.size=16;m.onchange=()=>S.setItem("gm",m.value.trim());
-  r2.append(k,m);a.append(rg,r1,r2);
-  $("cash").textContent=fmt(me.cash);$("net").textContent=fmt(net());
+// ---------- 畫面（像素 × 電腦視窗） ----------
+const winBar=(title,extra)=>el("div",{class:"bar"},el("span",{class:"tt",text:title}),...(extra||[]));
+function chart(s){ // 像素折線圖：紅漲綠跌，標示最高/最低與涵蓋時間
+  const pts=s.p||[s.price],n=pts.length;
+  if(n<2){return el("div",{class:"chart mu",text:"走勢資料累積中…（每 2 分鐘一個點）",style:"display:grid;place-items:center"});}
+  const W=300,H=84,P=8,lo=Math.min(...pts),hi=Math.max(...pts),rg=(hi-lo)||1;
+  const X=i=>P+i*(W-2*P)/(n-1),Y=v=>H-P-6-(v-lo)/rg*(H-2*P-10),NS="http://www.w3.org/2000/svg";
+  const svg=document.createElementNS(NS,"svg");svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.setAttribute("class","chart");svg.setAttribute("role","img");
+  svg.setAttribute("aria-label",`${s.name}股價走勢，最高 ${fmt(hi)}，最低 ${fmt(lo)}`);
+  [.25,.5,.75].forEach(f=>{const g=document.createElementNS(NS,"line");g.setAttribute("x1",P);g.setAttribute("x2",W-P);g.setAttribute("y1",H*f);g.setAttribute("y2",H*f);g.setAttribute("class","gd");svg.append(g);});
+  const ln=document.createElementNS(NS,"polyline");ln.setAttribute("points",pts.map((v,i)=>X(i).toFixed(1)+","+Y(v).toFixed(1)).join(" "));
+  ln.setAttribute("class","ln "+(pts[n-1]>=pts[0]?"up":"dn"));svg.append(ln);
+  const mins=Math.round((s.t[s.t.length-1]-s.t[0])/6e4),span=mins>=60?Math.round(mins/60)+" 小時":mins+" 分鐘";
+  [[fmt(hi),W-P,9,"end"],[fmt(lo),W-P,H-2,"end"],["近 "+span,P,H-2,"start"]].forEach(([t,x,y,a])=>{
+    const e=document.createElementNS(NS,"text");e.setAttribute("x",x);e.setAttribute("y",y);e.setAttribute("text-anchor",a);e.setAttribute("class","lb");e.textContent=t;svg.append(e);});
+  return svg;
+}
+function renderStrip(){
+  const s=$("strip");s.replaceChildren();
+  const chip=(ok,label,on)=>el("button",{class:"chip "+(ok?"ok":"todo"),type:"button",onclick:on},el("i",{class:"dot","aria-hidden":"true"}),el("span",{text:label}));
+  s.append(
+    chip(!!user,user?"Google："+(user.displayName||user.email||"已登入"):"以 Google 帳號登入",()=>{if(user){if(confirm("登出 Google？"))signOut(auth);}else gLogin();}),
+    chip(!!token,token?"工坊："+me.name:"連結《無限煉製》帳號",()=>{if(token){if(confirm("中斷《無限煉製》連線？"))logoutIA();}else login();}),
+    el("div",{class:"stat"},el("span",{class:"k",text:"現金 "}),el("b",{text:fmt(me.cash)}),el("span",{class:"k",text:"　淨值 "}),el("b",{text:fmt(net())})));
+}
+let craftSig="";
+function renderCraft(){
+  const sig=JSON.stringify([!!token,inv.map(x=>x.name),Object.keys(me.used||{}),item&&item.name,busy]);
+  if(sig===craftSig)return;craftSig=sig;
+  const w=$("craft");w.replaceChildren(winBar("📦 CREATION.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
+  const b=el("div",{class:"body"});
+  if(!token){b.append(el("p",{class:"mu",text:"先連結《無限煉製》帳號，才能挑選 24 小時內做出的造物來投入。"}));}
+  else{
+    const sel=el("select",{class:"px-sel","aria-label":"選擇要投入的造物"});
+    sel.append(new Option(inv.length?"▼ 選擇 24 小時內做出的造物":"24 小時內沒有新做出的造物",""));
+    inv.forEach((x,i)=>{const u=usedAt(x.name),o=new Option(`${x.name}（${u?"今日已投入":"剩 "+left(x.at)}）`,String(i));o.disabled=!!u;sel.append(o);});
+    sel.value=item&&inv.includes(item)&&!usedAt(item.name)?String(inv.indexOf(item)):"";
+    sel.onchange=()=>{item=inv[sel.value]||null;};
+    b.append(sel,el("p",{class:"mu",text:"每個造物每天只能投入一次；選好後，到想影響的股票視窗按「投入造物」。"}));
+  }
+  w.append(b);
+}
+function renderMarket(){
   const mk=$("market");mk.replaceChildren();
-  Object.entries(stocks).sort().forEach(([id,s])=>{
-    const c=document.createElement("div");c.className="card";
-    const top=document.createElement("div");top.className="row";
-    const nm=document.createElement("b");nm.append(icon(s.emoji),document.createElement("span"));nm.lastChild.textContent=" "+s.name;
-    const pr=document.createElement("span");pr.className="p grow";pr.style.textAlign="right";pr.textContent=fmt(s.price);top.append(nm,pr);
-    const lp=document.createElement("div");lp.className="mu";lp.textContent=(s.last?"上次投入："+s.last+"　":"")+"持有 "+(me.hold?.[id]||0);
-    const act2=document.createElement("div");act2.className="row";act2.style.marginTop="6px";
-    [["買 1",()=>trade(id,1)],["賣 1",()=>trade(id,-1)]].forEach(([t,f])=>{const b=document.createElement("button");b.className="g";b.textContent=t;b.disabled=busy||!token||!user;b.onclick=f;act2.append(b);});
-    const ij=document.createElement("button");ij.textContent="投入造物";ij.disabled=busy||!token||!user;ij.onclick=()=>inject(id);act2.append(ij);
-    c.append(top,lp,act2);mk.append(c);});
+  const ids=Object.keys(stocks).sort();
+  if(!ids.length){mk.append(el("p",{class:"mu",text:"行情載入中…"}));return;}
+  for(const id of ids){
+    const s=stocks[id],open=!collapsed.has(id),first=(s.p&&s.p[0])||s.price,ch=(s.price/first-1)*100,chTxt=(ch>=0?"+":"")+ch.toFixed(2)+"%";
+    const upP=Math.round(Math.min(.9,Math.max(.1,.5+(s.bias||0)))*100),n=me.hold?.[id]||0;
+    const w=el("section",{class:"win stock"+(open?"":" shut"),"aria-label":s.name});
+    w.append(winBar(`${s.emoji} ${id.toUpperCase()}.EXE`,[
+      ...(open?[]:[el("span",{class:"bt "+(ch>=0?"up":"dn"),text:`${fmt(s.price)} ${chTxt}`})]),
+      el("button",{class:"wb",type:"button","aria-label":(open?"收合 ":"展開 ")+s.name,"aria-expanded":String(open),text:open?"_":"▢",
+        onclick:()=>{open?collapsed.add(id):collapsed.delete(id);renderMarket();}}),
+      el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
+    const b=el("div",{class:"body"});
+    b.append(
+      el("div",{class:"hd"},el("span",{class:"nm",text:s.name}),el("span",{class:"px big",text:fmt(s.price)}),el("span",{class:"chg "+(ch>=0?"up":"dn"),text:chTxt})),
+      chart(s),
+      el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{style:`width:${upP}%`})),el("b",{text:upP+"%"})),
+      el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}`}),
+      el("div",{class:"acts"},
+        el("button",{class:"px-btn",type:"button",disabled:busy,text:"買 1",onclick:()=>trade(id,1)}),
+        el("button",{class:"px-btn",type:"button",disabled:busy,text:"賣 1",onclick:()=>trade(id,-1)}),
+        el("button",{class:"px-btn pri",type:"button",disabled:busy,text:"投入造物",onclick:()=>inject(id)})));
+    w.append(b);mk.append(w);
+  }
+}
+function render(){
+  if(hinting)$("msg").textContent=!user?"請先登入 Google，並連結《無限煉製》帳號":!token?"再連結《無限煉製》帳號，就能投入造物":"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」";
+  renderStrip();renderCraft();renderMarket();
+}
+function renderFeed(rows){
+  const f=$("feed");f.replaceChildren();
+  if(!rows.length)f.append(el("div",{class:"mu",text:"還沒有人投入造物"}));
+  rows.forEach(x=>{const t=x.at?.toDate?.();const hm=t?t.toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false}):"";
+    f.append(el("div",{class:x.pct>0?"up":"dn"},el("span",{class:"tm",text:hm}),
+      document.createTextNode(`${x.who} 將「${x.item}」投入 ${x.stock}：${x.score}分，${x.pct>0?"+":""}${x.pct}%${x.up!=null?"（上漲機率 "+x.up+"%）":""}`)));});
+}
+function wireSettings(){
+  const dlg=$("settings"),k=$("gkey"),upd=()=>{$("keystate").textContent=S.getItem("gk")?"✓ 已設定（只存在這個分頁）":"尚未設定";};
+  k.value=S.getItem("gk")||"";$("model").textContent=CFG.modelLabel;upd();
+  $("gear").onclick=()=>dlg.showModal();
+  $("close").onclick=()=>dlg.close();
+  dlg.addEventListener("click",e=>{if(e.target===dlg)dlg.close();});
+  k.onchange=()=>{S.setItem("gk",k.value.trim());upd();};
+  $("clearkey").onclick=()=>{S.removeItem("gk");k.value="";upd();};
 }
 
 // ---------- 啟動 ----------
 async function main(){
-  render();
+  wireSettings();render();
   if([CFG.firebase.apiKey,CFG.ia.clientId,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase、Client ID 與 Worker 網址");return;}
   const app=initializeApp(CFG.firebase);db=getFirestore(app);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
   onAuthStateChanged(auth,u=>{user=u;render();});
   await handleCallback();
-  onSnapshot(collection(db,"stocks"),async snap=>{
-    if(snap.empty){fetch(CFG.api+"/ensure-market",{method:"POST"}).catch(()=>{});return;}
-    stocks={};snap.forEach(d=>stocks[d.id]=d.data());render();});
-  onSnapshot(query(collection(db,"feed"),orderBy("at","desc"),limit(15)),snap=>{
-    const f=$("feed");f.replaceChildren();snap.forEach(d=>{const x=d.data(),e=document.createElement("div");
-      e.textContent=`${x.who} 將「${x.item}」投入 ${x.stock}：${x.score}分，${x.pct>0?"+":""}${x.pct}%（${x.reason}）`;
-      e.className=x.pct>0?"up":"dn";f.append(e);});});
+  onSnapshot(doc(db,"market","state"),snap=>{
+    if(!snap.exists()){fetch(CFG.api+"/ensure-market",{method:"POST"}).catch(()=>{});return;}
+    stocks=snap.data().stocks||{};render();});
+  onSnapshot(query(collection(db,"feed"),orderBy("at","desc"),limit(15)),snap=>{const rows=[];snap.forEach(d=>rows.push(d.data()));renderFeed(rows);});
   if(token)loadIA().then(render).catch(e=>say(e.message));
 }
 main();

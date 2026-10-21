@@ -8,6 +8,7 @@ export function encode(v){
   if(typeof v==="boolean")return {booleanValue:v};
   if(typeof v==="number")return Number.isInteger(v)?{integerValue:String(v)}:{doubleValue:v};
   if(typeof v==="string")return {stringValue:v};
+  if(Array.isArray(v))return {arrayValue:{values:v.map(encode)}};
   return {mapValue:{fields:Object.fromEntries(Object.entries(v).map(([k,x])=>[k,encode(x)]))}};
 }
 export function decode(f){
@@ -15,6 +16,7 @@ export function decode(f){
   if("doubleValue" in f)return f.doubleValue;
   if("stringValue" in f)return f.stringValue;
   if("booleanValue" in f)return f.booleanValue;
+  if("arrayValue" in f)return (f.arrayValue.values||[]).map(decode);
   if("timestampValue" in f)return Date.parse(f.timestampValue);
   if("mapValue" in f)return Object.fromEntries(Object.entries(f.mapValue.fields||{}).map(([k,x])=>[k,decode(x)]));
   return null;
