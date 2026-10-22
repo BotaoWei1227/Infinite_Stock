@@ -29,7 +29,7 @@ test("投入：只改變機率、價格不跳動；玩家(以 Google uid 為鍵)
   assert.equal(r.h.get("Access-Control-Allow-Origin"),"https://u.github.io");
   const f=MS(db).fire;assert.ok(Math.abs(f.bias-.05*20/30)<1e-9);assert.deepEqual(f.p,[12]);assert.equal(f.t.length,1);assert.equal(f.last,"火（90分）");   // 沒有新的價格點
   assert.equal(MS(db).water.price,10);
-  assert.equal(P(db).name,"測試工坊");assert.equal(P(db).cash,50);assert.deepEqual(P(db).hold,{});assert.ok(typeof P(db).used["火"]==="number");
+  assert.equal(P(db).name,"測試工坊");assert.equal(P(db).cash,50);assert.deepEqual(P(db).hold,{});assert.ok(typeof P(db).used["n:火"]==="number");
   assert.equal(feeds(db)[0].up,53);assert.equal(feeds(db)[0].pass,true);assert.equal("pct" in feeds(db)[0],false);assert.equal(feeds(db)[0].stock,"火");
   assert.equal(db.m.get("links/g1").data.iaId,"iau_1");assert.equal(db.m.get("iaLinks/iau_1").data.uid,"g1");
 });
@@ -84,13 +84,15 @@ test("參數檢查與 OPTIONS",async()=>{
   assert.equal((await call("/trade",TR({dir:5}))).status,400);
   assert.equal((await route(new Request("https://w/inject",{method:"OPTIONS"}),env,d)).status,204);
 });
-test("每個造物每天限一次；24 小時後可再投入，過期紀錄會被清掉",async()=>{
+test("同一個造物只能投入一次：隔多久都不能再投，其他造物不受影響",async()=>{
   const {call,db,t}=mk();await call("/ensure-market");
   assert.equal((await call("/inject",inj())).status,200);
-  t.v+=9000;let r=await call("/inject",inj());assert.equal(r.status,409);assert.match(r.body.error.message,/今天已經投入/);
+  assert.ok(typeof P(db).used["n:火"]==="number");
+  t.v+=9000;let r=await call("/inject",inj());assert.equal(r.status,409);assert.match(r.body.error.message,/已經投入過/);
+  r=await call("/inject",inj({itemName:" 火 "}));assert.equal(r.status,409);                       // 加空白也一樣
   assert.equal((await call("/inject",inj({itemName:"雷"}))).status,200);
-  assert.deepEqual(Object.keys(P(db).used).sort(),["火","雷"].sort());
-  t.v+=25*H;assert.equal((await call("/inject",inj())).status,200);assert.deepEqual(Object.keys(P(db).used),["火"]);
+  assert.deepEqual(Object.keys(P(db).used).sort(),["n:火","n:雷"]);
+  t.v+=25*H;assert.equal((await call("/inject",inj())).status,409);                               // 24 小時後（又合成了一次）也不行
 });
 
 test("銀行：無限借款→利息累計→還款；欠款不被其他操作覆蓋",async()=>{
@@ -206,4 +208,40 @@ test("投入的機率提升每 5 分鐘降 10%（兩個方向都回到 50%），
   assert.ok(Math.abs(MS(a.db).fire.bias-MS(b.db).fire.bias)<1e-9);assert.ok(Math.abs(MS(a.db).fire.bias-.05*.81)<1e-9);
   // 買賣疊加在「已衰減」的值上
   b.t.v+=M;await b.call("/trade",TR());assert.ok(Math.abs(MS(b.db).fire.bias-(.05*.81*.9+.01))<1e-9);
+});
+
+test("存款：活存/定存的存入、領出、利息、到期轉換、提前解約；不被其他操作覆蓋",async()=>{
+  const {call,db,t}=mk();await call("/ensure-market");
+  let r=await call("/bank",BK({action:"dem_in",amount:30}));assert.equal(r.status,200);assert.equal(r.body.cash,20);assert.equal(r.body.deposits,30);
+  r=await call("/bank",BK({action:"td_in",amount:20}));assert.equal(r.status,200);assert.equal(r.body.cash,0);assert.equal(r.body.deposits,50);
+  const at=P(db).tds[0].t;assert.deepEqual(P(db).dem.a,30);assert.equal(P(db).tds.length,1);
+  await call("/trade",TR({dir:1}));                                                                   // 現金 0 買不起 → 失敗，但不影響存款
+  assert.equal(P(db).tds.length,1);
+  t.v+=DAYMS;r=await call("/bank",BK({action:"dem_out",amount:10}));assert.equal(r.status,200);
+  assert.ok(Math.abs(r.body.cash-10)<1e-9);assert.ok(Math.abs(P(db).dem.a-(30*1.004-10))<1e-3);
+  assert.equal((await call("/bank",BK({action:"td_break",at:at+1}))).status,409);                    // 找不到
+  r=await call("/bank",BK({action:"td_break",at}));assert.equal(r.status,200);assert.equal(r.body.cash,30);assert.equal(P(db).tds.length,0);   // 只退本金 20
+  await call("/bank",BK({action:"td_in",amount:30}));const at2=P(db).tds[0].t;
+  t.v+=4*DAYMS;r=await call("/bank",BK({action:"check"}));assert.equal(r.status,200);                 // check 不結算
+  r=await call("/bank",BK({action:"dem_out",all:true}));assert.equal(r.status,200);
+  assert.ok(Math.abs(r.body.cash-((30*1.004-10)*1.004**4+30*1.012**3*1.004))<0.02,String(r.body.cash));   // 活存餘額＋到期的定存（再算 1 天活存）
+  assert.equal(P(db).tds.length,0);assert.equal(P(db).dem.a,0);
+  assert.equal((await call("/bank",BK({action:"td_break",at:at2}))).status,409);                      // 已到期轉入活存，不能再解約
+});
+test("存款：錯誤處理與限制",async()=>{
+  const {call}=mk();await call("/ensure-market");
+  assert.equal((await call("/bank",BK({action:"dem_in",amount:60}))).status,409);                    // 現金只有 50
+  assert.equal((await call("/bank",BK({action:"dem_out",amount:5}))).status,409);                    // 沒有餘額
+  assert.equal((await call("/bank",BK({action:"td_in",amount:0.001}))).status,400);                  // 金額檢查（四捨五入後 <0.01 不合法）
+  assert.equal((await call("/bank",BK({action:"td_in",amount:0.5}))).status,409);                    // 定存最少 1
+  assert.equal((await call("/bank",BK({action:"td_break"}))).status,400);
+  for(let i=0;i<20;i++)assert.equal((await call("/bank",BK({action:"td_in",amount:1}))).status,200,String(i));
+  assert.equal((await call("/bank",BK({action:"td_in",amount:1}))).status,409);                      // 定存最多 20 筆（這裡現金只剩 30）
+});
+test("黑道：連存款也一併被搶光",async()=>{
+  const {call,db,t}=mk();await call("/ensure-market");
+  await call("/bank",BK({action:"borrow",amount:300}));await call("/bank",BK({action:"dem_in",amount:100}));await call("/bank",BK({action:"td_in",amount:100}));
+  assert.equal(P(db).tds.length,1);
+  t.v+=25*H;const r=await call("/bank",BK({action:"dem_out",all:true}));assert.equal(r.status,409);assert.equal(r.body.error.code,"mob");
+  assert.deepEqual([P(db).cash,P(db).dem.a,P(db).tds.length,P(db).loan.p],[50,0,0,0]);
 });

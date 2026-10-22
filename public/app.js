@@ -58,7 +58,7 @@ const icon=(e,url)=>{const s=document.createElement("span"),u=okUrl(url);s.textC
   if(u){const i=new Image();i.className="ic";i.alt="";i.loading="lazy";i.src=u;i.onload=()=>s.replaceChildren(i);}return s;};
 
 const left=at=>{const m=Math.max(0,Math.floor((864e5-(Date.now()-at))/6e4));return m>=60?Math.floor(m/60)+" 小時":m+" 分";};
-const usedAt=name=>{const t=(me.used||{})[name];return typeof t==="number"&&Date.now()-t<864e5?t:0;};
+const usedBefore=name=>{const u=me.used||{};return Object.hasOwn(u,"n:"+String(name).normalize("NFKC").trim().toLowerCase())||Object.hasOwn(u,name);};   // 同一個造物只能投入一次
 const el=(tag,p={},...kids)=>{const e=document.createElement(tag);
   for(const [k,v] of Object.entries(p)){if(k==="class")e.className=v;else if(k==="text")e.textContent=v;else if(k==="disabled"||k==="hidden")e[k]=!!v;else if(k.startsWith("on"))e[k]=v;else e.setAttribute(k,v);}
   e.append(...kids);return e;};
@@ -103,13 +103,27 @@ function refreshGauges(){   // 兩次行情更新之間，機率條也會慢慢�
   document.querySelectorAll(".gp").forEach(b=>{const s=stocks[b.dataset.id];if(s)b.textContent=upPct(s)+"%";});
 }
 const DAYMS=864e5,RATE=.05,MOB_LIMIT=100;
+// 存款（須與伺服器 worker/src/logic.js 一致）：活存日利率 0.4%；定存日利率 1.2%、鎖 3 天，到期自動轉入活存
+const DEM_RATE=.004,TD_RATE=.012,TD_DAYS=3;
+const grow=(r,ms)=>Math.pow(1+r,Math.max(0,ms)/DAYMS);
+const demValueC=(dem,now)=>dem&&dem.a>0?dem.a*grow(DEM_RATE,now-dem.t):0;
+const tdEndC=td=>td.t+TD_DAYS*DAYMS;
+const tdValueC=(td,now)=>td.p*grow(TD_RATE,Math.min(now,tdEndC(td))-td.t);
+function settleC(d,now){
+  let dem=d.dem&&d.dem.a>0?{a:d.dem.a,t:d.dem.t}:{a:0,t:now};const live=[],done=[];
+  for(const td of d.tds||[])(tdEndC(td)<=now?done:live).push(td);
+  done.sort((x,y)=>tdEndC(x)-tdEndC(y));
+  for(const td of done){const T=tdEndC(td);dem={a:demValueC(dem,T)+tdValueC(td,T),t:T};}
+  return {dem:{a:demValueC(dem,now),t:now},tds:live};
+}
+const depositsNow=()=>{const n=Date.now(),s=settleC(me,n);return s.dem.a+s.tds.reduce((a,t)=>a+tdValueC(t,n),0);};
 const overAtClient=()=>{const l=me.loan;if(!l||!(l.p>0))return null;if(owedNow()<=MOB_LIMIT)return null;if(l.over!=null)return l.over;if(l.p>=MOB_LIMIT)return l.t;return l.t+DAYMS*Math.log(MOB_LIMIT/l.p)/Math.log(1+RATE);};
 const mobDueClient=()=>{const o=overAtClient();return o!=null&&Date.now()-o>=DAYMS;};
 const hmLeft=ms=>{const m=Math.max(0,Math.ceil(ms/6e4));return m>=60?Math.floor(m/60)+" 小時 "+(m%60)+" 分":m+" 分";};
 let checking=false;
 function checkMob(){if(checking||!user||!mobDueClient())return;checking=true;act("bank",{action:"check"}).finally(()=>{checking=false;});}
 const owedNow=()=>{const l=me.loan;return l&&l.p>0?l.p*Math.pow(1+RATE,Math.max(0,Date.now()-l.t)/DAYMS):0;};
-const net=()=>me.cash+Object.entries(me.hold||{}).reduce((a,[k,n])=>a+n*(stocks[k]?.price||0),0)-owedNow();
+const net=()=>me.cash+Object.entries(me.hold||{}).reduce((a,[k,n])=>a+n*(stocks[k]?.price||0),0)-owedNow()+depositsNow();
 const bankAct=async(action,amount,all)=>{const r=await act("bank",{action,amount,all});
   if(r){say(action==="borrow"?`已借入 ${fmt(amount)}，目前欠款 ${fmt(r.owed)}`:(r.owed>0?`已還款，剩餘欠款 ${fmt(r.owed)}`:"已全額還清，沒有欠款了"));}return r;};
 
@@ -152,10 +166,10 @@ function renderCraft(){
   if(token){
     const sel=el("select",{class:"px-sel","aria-label":"選擇要投入的造物"});
     sel.append(new Option(inv.length?"▼ 選擇 24 小時內做出的造物":"24 小時內沒有新做出的造物",""));
-    inv.forEach((x,i)=>{const u=usedAt(x.name),o=new Option(`${x.name}（${u?"今日已投入":"剩 "+left(x.at)}）`,String(i));o.disabled=!!u;sel.append(o);});
-    sel.value=item&&inv.includes(item)&&!usedAt(item.name)?String(inv.indexOf(item)):"";
+    inv.forEach((x,i)=>{const u=usedBefore(x.name),o=new Option(`${x.name}（${u?"已投入過":"剩 "+left(x.at)}）`,String(i));o.disabled=!!u;sel.append(o);});
+    sel.value=item&&inv.includes(item)&&!usedBefore(item.name)?String(inv.indexOf(item)):"";
     sel.onchange=()=>{item=inv[sel.value]||null;};
-    b.append(sel,el("p",{class:"mu",text:"每個造物每天只能投入一次；選好後，到想影響的股票視窗按「投入造物」。"}));
+    b.append(sel,el("p",{class:"mu",text:"每個造物只能投入一次，不能重複；選好後，到想影響的股票視窗按「投入造物」。"}));
   }
   if(isDev)b.append(el("label",{class:"lbl",for:"devitem",text:"🛠 開發者：自己打字輸入造物（有填就優先使用，不需要連結《無限煉製》）"}),
     el("input",{class:"px-in",id:"devitem",type:"text",maxlength:"60",autocomplete:"off",placeholder:"例如：蒸氣龍",value:devText,oninput:e=>{devText=e.target.value;}}));
@@ -189,7 +203,7 @@ function renderMarket(){
 }
 
 // ---------- 銀行 ----------
-const bk={};
+const bk={},sv={};
 function buildBank(){
   const v=$("v-bank");v.replaceChildren();
   const w=el("section",{class:"win","aria-label":"銀行"});
@@ -208,10 +222,47 @@ function buildBank(){
       el("div",{class:"cell"},el("span",{class:"k",text:"黑道上門倒數"}),bk.mob),el("div",{class:"cell debt"},el("span",{class:"k",text:"24 小時後欠款"}),bk.next)),
     el("label",{class:"lbl",for:"bamt",text:"金額"}),bk.amt,el("div",{class:"row"},bk.b1,bk.b2,bk.b3),
     el("p",{class:"warn",text:`欠款會從淨值扣掉。欠款超過 ${MOB_LIMIT} 並連續超過 24 小時，黑道就會上門：資產清空，只能重新開始。借來的錢可以拿去買股票，但股價可能跌。`}),bk.times);
-  w.append(b);v.append(w);bankBuilt=true;
+  w.append(b);v.append(w);buildSavings(v);bankBuilt=true;
+}
+async function depAct(action,{all=false,at}={}){
+  const a=parseFloat(sv.amt.value),needs=["dem_in","dem_out","td_in"].includes(action)&&!all;
+  if(needs&&!(a>0))return say("請輸入金額");
+  if(action==="td_break"&&!confirm("提前解約只退回本金，利息會作廢，確定嗎？"))return;
+  const r=await act("bank",{action,amount:needs?a:undefined,all,at});
+  if(r){say({dem_in:`已存入活存 ${fmt(a)}`,dem_out:all?"已領出全部活存":`已領出活存 ${fmt(a)}`,td_in:`已存入定存 ${fmt(a)}（鎖 ${TD_DAYS} 天）`,td_break:"已提前解約，退回本金（利息作廢）"}[action]);
+    if(action!=="td_break")sv.amt.value="";}
+}
+function buildSavings(v){
+  const w=el("section",{class:"win","aria-label":"存款"});
+  w.append(winBar("💰 SAVINGS.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
+  sv.dem=el("b");sv.td=el("b");sv.sum=el("b");sv.day=el("b");sv.list=el("ul",{class:"list"});sv.sig="";
+  sv.amt=el("input",{class:"px-in",type:"number",inputmode:"decimal",min:"0.01",step:"0.01",placeholder:"金額",id:"samt","aria-label":"存款金額"});
+  const btn=(label,action,extra,pri)=>el("button",{class:"px-btn"+(pri?" pri":""),type:"button",text:label,onclick:()=>depAct(action,extra)});
+  sv.btns=[btn("存入活存","dem_in",{},true),btn("領出活存","dem_out"),btn("全部領出","dem_out",{all:true}),btn(`存入定存（${TD_DAYS} 天）`,"td_in")];
+  w.append(el("div",{class:"body"},
+    el("p",{class:"mu",text:`活存：日利率 ${DEM_RATE*100}%，隨時存取。定存：日利率 ${TD_RATE*100}%，鎖 ${TD_DAYS} 天，到期自動轉入活存；提前解約只退本金，利息作廢。`}),
+    el("div",{class:"grid"},
+      el("div",{class:"cell"},el("span",{class:"k",text:"活存餘額"}),sv.dem),el("div",{class:"cell"},el("span",{class:"k",text:"定存（含利息）"}),sv.td),
+      el("div",{class:"cell"},el("span",{class:"k",text:"存款總額"}),sv.sum),el("div",{class:"cell"},el("span",{class:"k",text:"每日利息（估）"}),sv.day)),
+    el("label",{class:"lbl",for:"samt",text:"金額"}),sv.amt,el("div",{class:"row"},...sv.btns),
+    el("h2",{class:"h2",text:"定存明細"}),sv.list));
+  v.append(w);
+}
+function updateSavings(){
+  const now=Date.now(),s=settleC(me,now),tdv=s.tds.map(t=>tdValueC(t,now)),tdTotal=tdv.reduce((a,x)=>a+x,0);
+  sv.dem.textContent=fmt(s.dem.a);sv.td.textContent=fmt(tdTotal);sv.sum.textContent=fmt(s.dem.a+tdTotal);sv.day.textContent=fmt(s.dem.a*DEM_RATE+tdTotal*TD_RATE);
+  const sig=JSON.stringify(s.tds.map(t=>t.t));
+  if(sig!==sv.sig){sv.sig=sig;sv.list.replaceChildren();sv.rows=s.tds.map(t=>{
+    const span=el("span",{class:"mu"});
+    sv.list.append(el("li",{},span,el("button",{class:"px-btn sm",type:"button",text:"提前解約","aria-label":"提前解約這筆定存，只退本金",onclick:()=>depAct("td_break",{at:t.t})})));
+    return span;});
+    if(!s.tds.length)sv.list.append(el("li",{},el("span",{class:"mu",text:"目前沒有定存"})));}
+  s.tds.forEach((t,i)=>{sv.rows[i].textContent=`本金 ${fmt(t.p)}｜目前 ${fmt(tdv[i])}｜到期剩 ${hmLeft(tdEndC(t)-now)}`;});
+  sv.btns.forEach(b=>{b.disabled=busy;});sv.list.querySelectorAll("button").forEach(b=>{b.disabled=busy;});
 }
 function updateBank(){
   if(!bankBuilt)buildBank();
+  updateSavings();
   const o=owedNow();bk.owed.textContent=fmt(o);bk.cash.textContent=fmt(me.cash);
   bk.next.textContent=fmt(o*(1+RATE));
   const ov=overAtClient(),left_=ov==null?0:ov+DAYMS-Date.now();
@@ -230,7 +281,7 @@ function renderWork(){
   if(!token)b.append(el("p",{class:"mu",text:"連結《無限煉製》帳號後，這裡會列出你做出的造物，以及哪些還能投入股票。"}));
   else if(!inv.length)b.append(el("p",{class:"mu",text:"24 小時內沒有新做出的造物。到遊戲裡煉成新東西吧！"}));
   else{const ul=el("ul",{class:"list"});
-    inv.forEach(x=>{const u=usedAt(x.name);ul.append(el("li",{},el("span",{class:u?"off":"",text:x.name}),el("span",{class:"mu",text:u?"今日已投入":"剩 "+left(x.at)+"・可投入"})));});
+    inv.forEach(x=>{const u=usedBefore(x.name);ul.append(el("li",{},el("span",{class:u?"off":"",text:x.name}),el("span",{class:"mu",text:u?"已投入過":"剩 "+left(x.at)+"・可投入"})));});
     b.append(ul);}
   w.append(b);v.append(w);
 }
@@ -273,7 +324,7 @@ function wireNav(){
   $("menu").onclick=()=>dr.showModal();$("dclose").onclick=()=>dr.close();
   dr.addEventListener("click",e=>{if(e.target===dr)dr.close();});
   dr.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>{dr.close();setView(b.dataset.v);});
-  setInterval(()=>{refreshGauges();checkMob();if(view==="bank"&&document.activeElement!==bk.amt){renderStrip();updateBank();}},5000);
+  setInterval(()=>{refreshGauges();checkMob();if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
 }
 function renderFeed(rows){
   const f=$("feed");f.replaceChildren();

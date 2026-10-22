@@ -1,5 +1,5 @@
 import test from "node:test";import assert from "node:assert";
-import {effBias,DECAY,DECAY_MS,SIM_THRESHOLD,passes,upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,TRADE_NUDGE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
+import {demValue,tdValue,tdEnd,settle,depositsValue,demIn,demOut,tdIn,tdBreak,DEM_RATE,TD_RATE,TD_DAYS,MAX_TDS,effBias,DECAY,DECAY_MS,SIM_THRESHOLD,passes,upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,TRADE_NUDGE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
 const near=(a,b,e=1e-9)=>Math.abs(a-b)<e;
 const S=(o={})=>({price:12,base:12,bias:0,t:[0],p:[12],...o});
 test("相似度門檻：要高過 70 才算相關；越高於/低於門檻影響越大；等於門檻沒有影響",()=>{
@@ -45,11 +45,16 @@ test("24 小時內的成功合成才算",()=>{
   assert.equal(recent([{result:"雷",createdAt:now-DAY}],now).has("雷"),true);
   assert.equal(recent([{result:"雷",createdAt:now-DAY-1}],now).has("雷"),false);
 });
-import {usedRecent,markUsed} from "../src/logic.js";
-test("每個造物每 24 小時限一次，過期自動清掉",()=>{
-  const now=1e13,h=3600e3;
-  assert.equal(usedRecent({火:now-h},"火",now),true);assert.equal(usedRecent({火:now-DAY},"火",now),false);assert.equal(usedRecent({},"火",now),false);assert.equal(usedRecent(undefined,"火",now),false);
-  assert.deepEqual(markUsed({水:now-25*h,雷:now-h},"火",now),{雷:now-h,火:now});
+import {usedKey,usedBefore,markUsed} from "../src/logic.js";
+test("同一個造物只能投入一次：名稱正規化、舊資料相容、有數量上限",()=>{
+  const now=1e13;
+  let u=markUsed({},"火焰",now);assert.deepEqual(Object.keys(u),["n:火焰"]);
+  assert.equal(usedBefore(u,"火焰"),true);assert.equal(usedBefore(u,"水"),false);assert.equal(usedBefore(undefined,"火焰"),false);
+  assert.equal(usedBefore(markUsed({},"ＡＢ c",now),"ab C"),true);assert.equal(usedKey("  Ｆｉｒｅ "),"n:fire");   // 全形、大小寫、空白都擋
+  assert.equal(usedBefore({火:1},"火"),true);                                                                    // 舊資料（沒有前綴的名稱）也算
+  assert.equal(usedBefore(markUsed({},"__x__",now),"__x__"),true);assert.ok(Object.keys(markUsed({},"__x__",now))[0].startsWith("n:"));
+  let big={};for(let i=0;i<2100;i++)big=markUsed(big,"造物"+i,now+i);
+  assert.equal(Object.keys(big).length,2000);assert.equal(usedBefore(big,"造物0"),false);assert.equal(usedBefore(big,"造物2099"),true);   // 超過上限丟最舊的
 });
 
 import {owed,borrow,repay,overAt,mobDue,MOB_LIMIT,RATE} from "../src/logic.js";
@@ -98,4 +103,45 @@ test("機率提升每 5 分鐘降 10%，直到回到 50%；低於 50% 的對稱�
   assert.equal(effBias({bias:.1,biasAt:M},0),.1);                                                   // 時鐘倒退不會放大
   assert.equal(effBias({bias:.1},123),.1);assert.equal(effBias({},5),0);                            // 舊資料沒有 biasAt → 不衰減
   assert.ok(near(effBias({bias:effBias(hi,M),biasAt:M},2*M),effBias(hi,2*M)));                       // 分段衰減＝一次衰減（和排程間隔無關）
+});
+
+test("存款：活存日利率 0.4%、定存日利率 1.2% 鎖 3 天，按時間連續複利",()=>{
+  const t0=1e13,D=DAY;
+  assert.equal(DEM_RATE,.004);assert.equal(TD_RATE,.012);assert.equal(TD_DAYS,3);
+  assert.ok(near(demValue({a:100,t:t0},t0+D),100.4));assert.ok(near(demValue({a:100,t:t0},t0+2*D),100.8016));assert.equal(demValue(undefined,t0),0);
+  const td={p:100,t:t0};
+  assert.ok(near(tdValue(td,t0+D),101.2));assert.ok(near(tdValue(td,t0+3*D),100*1.012**3));
+  assert.ok(near(tdValue(td,t0+10*D),100*1.012**3));                                  // 到期後不再以定存利率累計
+  assert.equal(tdEnd(td),t0+3*D);
+});
+test("存款：到期的定存自動轉入活存（之後以活存利率計息），結算按到期先後",()=>{
+  const t0=1e13,D=DAY,td=100*1.012**3;
+  let s=settle({dem:{a:50,t:t0},tds:[{p:100,t:t0}]},t0+2*D);                          // 還沒到期
+  assert.equal(s.tds.length,1);assert.ok(near(s.dem.a,50*1.004**2,1e-3));
+  s=settle({tds:[{p:100,t:t0}]},t0+4*D);                                              // 第 3 天到期 → 活存再算 1 天
+  assert.equal(s.tds.length,0);assert.ok(near(s.dem.a,td*1.004,1e-3));assert.equal(s.dem.t,t0+4*D);
+  s=settle({dem:{a:50,t:t0},tds:[{p:100,t:t0}]},t0+4*D);                              // 原本就有活存
+  assert.ok(near(s.dem.a,(50*1.004**3+td)*1.004,1e-3));
+  s=settle({tds:[{p:100,t:t0},{p:200,t:t0+D}]},t0+5*D);                               // 兩筆先後到期
+  const mid=100*1.012**3,at4=mid*1.004**1+200*1.012**3;                                // 第 3 天到期 100；第 4 天又到期 200
+  assert.ok(near(s.dem.a,at4*1.004,1e-3));
+  assert.ok(near(depositsValue({dem:{a:50,t:t0},tds:[{p:100,t:t0}]},t0+D),50*1.004+101.2,1e-3));   // 總額＝活存＋定存（含利息）
+});
+test("存款：存入/領出/定存/提前解約（只退本金）與各種錯誤",()=>{
+  const t0=1e13,D=DAY;
+  let r=demIn({cash:100},40,t0);assert.deepEqual([r.cash,r.dem.a],[60,40]);
+  assert.throws(()=>demIn({cash:10},40,t0),/現金不足/);
+  const d={cash:60,dem:{a:40,t:t0}};
+  r=demOut(d,10,t0+D,false);assert.equal(r.cash,70);assert.ok(near(r.dem.a,40*1.004-10,1e-3));
+  r=demOut(d,0,t0+D,true);assert.equal(r.cash,100.16);assert.equal(r.dem.a,0);
+  r=demOut(d,40.16,t0+D,false);assert.equal(r.dem.a,0);                              // 剛好等於餘額（差不到半分錢）→ 全領
+  assert.throws(()=>demOut(d,40.17,t0+D,false),/不足/);                                // 多領 1 分錢就報錯
+  assert.throws(()=>demOut(d,50,t0+D,false),/不足/);assert.throws(()=>demOut({cash:1},5,t0,false),/沒有餘額/);
+  r=tdIn({cash:100},30,t0);assert.deepEqual([r.cash,r.tds],[70,[{p:30,t:t0}]]);
+  assert.throws(()=>tdIn({cash:100},0.5,t0),/最少/);assert.throws(()=>tdIn({cash:10},30,t0),/現金不足/);
+  const many=Array.from({length:MAX_TDS},(_,i)=>({p:1,t:t0+i}));assert.throws(()=>tdIn({cash:100,tds:many},5,t0+1000),/最多/);
+  const withTd={cash:0,tds:[{p:100,t:t0}]};
+  r=tdBreak(withTd,t0,t0+D);assert.equal(r.cash,100);assert.deepEqual(r.tds,[]);        // 提前解約：只退本金，1 天的利息作廢
+  assert.throws(()=>tdBreak(withTd,t0+1,t0+D),/找不到/);
+  assert.throws(()=>tdBreak(withTd,t0,t0+4*D),/找不到/);                                // 已到期轉入活存，不能再「解約」
 });

@@ -38,9 +38,16 @@ export function recent(items,now){
   }
   return m;
 }
-// 每個造物每 24 小時只能投入一次（玩家文件的 used：造物名 → 投入時間）
-export const usedRecent=(u,name,now)=>{const t=(u||{})[name];return typeof t==="number"&&now-t<DAY&&t<=now+60000;};
-export const markUsed=(u,name,now)=>({...Object.fromEntries(Object.entries(u||{}).filter(([,t])=>typeof t==="number"&&now-t<DAY)),[name]:now});
+// 每個造物，同一個玩家只能投入一次（玩家文件的 used：造物名 → 投入時間）。
+// 名稱先做 NFKC＋小寫＋去頭尾空白（全形/大小寫不能鑽漏洞），並加 "n:" 前綴避開 Firestore 的保留字樣
+export const usedKey=n=>"n:"+String(n).normalize("NFKC").trim().toLowerCase();
+export const usedBefore=(u,name)=>!!u&&(Object.hasOwn(u,usedKey(name))||Object.hasOwn(u,name));   // 也相容舊資料（原樣的名稱）
+const MAX_USED=2000;
+export function markUsed(u,name,now){
+  const m={...(u||{}),[usedKey(name)]:now},keys=Object.keys(m);
+  if(keys.length>MAX_USED)keys.sort((a,b)=>m[a]-m[b]).slice(0,keys.length-MAX_USED).forEach(k=>delete m[k]);
+  return m;
+}
 
 // ---- 銀行（高利貸）：利率 5% / 24 小時，按時間連續複利；可無限借款
 // ---- 黑道：欠款超過 MOB_LIMIT 並「連續」超過 24 小時 → 黑道上門，資產清空重新開始
@@ -68,4 +75,49 @@ export function repay(d,amount,now,all){
   const full=all||amount>=o,pay=full?Math.ceil(o*100-1e-9)/100:amount;
   if(d.cash+1e-9<pay)throw new Error("現金不足");
   return {cash:cents(d.cash-pay),loan:full?{p:0,t:now}:nextLoan(d.loan,cents(o-pay),now)};
+}
+
+// ---- 存款：活存日利率 0.4%（隨時存取）；定存日利率 1.2%，鎖 3 天，到期自動轉入活存（之後以活存利率計息）
+// 提前解約只退本金、利息作廢。利息按真實時間連續複利。
+export const DEM_RATE=.004,TD_RATE=.012,TD_DAYS=3,MAX_TDS=20;
+const grow=(r,ms)=>Math.pow(1+r,Math.max(0,ms)/DAY);
+const r4=n=>Math.round(n*1e4)/1e4;
+export const tdEnd=td=>td.t+TD_DAYS*DAY;
+export const demValue=(dem,now)=>dem&&dem.a>0?dem.a*grow(DEM_RATE,now-dem.t):0;
+export const tdValue=(td,now)=>td.p*grow(TD_RATE,Math.min(now,tdEnd(td))-td.t);
+// 把已到期的定存，依到期先後轉入活存，並把活存結算到 now；回傳 {dem:{a,t:now}, tds:尚未到期的定存}
+export function settle(d,now){
+  let dem=d.dem&&d.dem.a>0?{a:d.dem.a,t:d.dem.t}:{a:0,t:now};
+  const live=[],done=[];
+  for(const td of d.tds||[])(tdEnd(td)<=now?done:live).push(td);
+  done.sort((x,y)=>tdEnd(x)-tdEnd(y));
+  for(const td of done){const T=tdEnd(td);dem={a:demValue(dem,T)+tdValue(td,T),t:T};}
+  return {dem:{a:r4(demValue(dem,now)),t:now},tds:live};
+}
+export const depositsValue=(d,now)=>{const s=settle(d,now);return s.dem.a+s.tds.reduce((a,t)=>a+tdValue(t,now),0);};
+export function demIn(d,amt,now){
+  const s=settle(d,now);
+  if(d.cash+1e-9<amt)throw new Error("現金不足");
+  return {cash:cents(d.cash-amt),dem:{a:r4(s.dem.a+amt),t:now},tds:s.tds};
+}
+export function demOut(d,amt,now,all){
+  const s=settle(d,now),v=s.dem.a;
+  if(v<.005)throw new Error("活存沒有餘額");
+  if(!all&&amt>v+.005)throw new Error("活存餘額不足");     // 要領的比餘額多 → 報錯，不會默默當成全領
+  const everything=all||amt>=v-.005;                      // 差不到半分錢視為全領
+  const take=everything?cents(v):amt;
+  return {cash:cents(d.cash+take),dem:{a:everything?0:r4(v-take),t:now},tds:s.tds};
+}
+export function tdIn(d,amt,now){
+  const s=settle(d,now);
+  if(amt<1)throw new Error("定存最少 1");
+  if(s.tds.length>=MAX_TDS)throw new Error(`定存最多 ${MAX_TDS} 筆`);
+  if(d.cash+1e-9<amt)throw new Error("現金不足");
+  return {cash:cents(d.cash-amt),dem:s.dem,tds:[...s.tds,{p:r4(amt),t:now}]};
+}
+// 以「存入時間」辨識是哪一筆（比序號穩，不會因為別筆剛好到期而錯位）
+export function tdBreak(d,at,now){
+  const s=settle(d,now),td=s.tds.find(x=>x.t===at);
+  if(!td)throw new Error("找不到這筆定存（可能已到期，轉入活存了）");
+  return {cash:cents(d.cash+td.p),dem:s.dem,tds:s.tds.filter(x=>x!==td)};
 }

@@ -42,7 +42,7 @@ async function strikeIfDue(d,pid,p){
   if(!p||!L.mobDue(p.data.loan,now))return;
   const owed=Math.round(L.owed(p.data.loan,now)*100)/100;
   await d.db.commit([
-    {path:pid,data:{cash:START,hold:{},loan:{p:0,t:now},bankrupt:(p.data.bankrupt||0)+1},pre:p.version},
+    {path:pid,data:{cash:START,hold:{},loan:{p:0,t:now},dem:{a:0,t:now},tds:[],bankrupt:(p.data.bankrupt||0)+1},pre:p.version},
     {path:`feed/${crypto.randomUUID()}`,data:{who:p.data.name||"玩家",mob:true,owed},ts:["at"],pre:null}]);
   throw new HttpError(409,"mob",STRIKE_MSG);
 }
@@ -64,7 +64,7 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
   const s0=m0?.data.stocks?.[stockId];
   if(!s0)throw new HttpError(404,"not-found","找不到這檔股票");
   if(cool(p0))throw new HttpError(429,"resource-exhausted","投入太頻繁，請稍候幾秒");
-  if(!dev&&L.usedRecent(p0?.data.used,itemName,d.now()))throw new HttpError(409,"failed-precondition","這個造物今天已經投入過了（每個造物每天限一次）");
+  if(!dev&&L.usedBefore(p0?.data.used,itemName))throw new HttpError(409,"failed-precondition","這個造物你已經投入過了（同一個造物只能投入一次，不能重複）");
   if(!dev&&!L.recent(await d.ia.history(iaToken),d.now()).has(itemName))throw new HttpError(403,"permission-denied","只能投入 24 小時內做出的造物");
   const j=await d.judge(s0.name,itemName,geminiKey);
   return retry(async()=>{
@@ -73,7 +73,7 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
     const stocks=m?.data.stocks,s=stocks?.[stockId];
     if(!s)throw new HttpError(404,"not-found","找不到這檔股票");
     if(cool(p))throw new HttpError(429,"resource-exhausted","投入太頻繁，請稍候幾秒");
-    if(!dev&&L.usedRecent(p?.data.used,itemName,d.now()))throw new HttpError(409,"failed-precondition","這個造物今天已經投入過了（每個造物每天限一次）");
+    if(!dev&&L.usedBefore(p?.data.used,itemName))throw new HttpError(409,"failed-precondition","這個造物你已經投入過了（同一個造物只能投入一次，不能重複）");
     const now=d.now(),bias=L.nudge(L.effBias(s,now),j.score),up=Math.round(L.upProb(bias)*100);
     const next={...s,bias,biasAt:now,last:`${itemName}（${j.score}分）`};   // 只改變上漲機率；價格由排程隨機走，投入當下不會跳動
     const who=dev?(a.name||"開發者"):(me.workshopName||a.name||"無名工坊");
@@ -102,20 +102,28 @@ async function trade(d,a,{stockId,dir}={}){
     return {ok:true};
   });
 }
-// 銀行：借款 / 還款 / 全額還清 / check（只檢查黑道）。同樣不需要 IA
-async function bank(d,a,{action,amount,all}={}){
-  if(!["borrow","repay","check"].includes(action))throw bad("參數錯誤");
-  const amt=Math.round(Number(amount)*100)/100,full=action==="repay"&&all===true;
-  if(action!=="check"&&!full&&!(Number.isFinite(amt)&&amt>=.01&&amt<=1e6))throw bad("金額不正確（0.01–1,000,000）");
+// 銀行：借款 / 還款 / 全額還清 / 活存存提 / 定存存入與提前解約 / check（只檢查黑道）。都不需要 IA
+const DEP=["dem_in","dem_out","td_in","td_break"];
+async function bank(d,a,{action,amount,all,at}={}){
+  if(!["borrow","repay","check",...DEP].includes(action))throw bad("參數錯誤");
+  const amt=Math.round(Number(amount)*100)/100,everything=all===true&&(action==="repay"||action==="dem_out");
+  if(["borrow","repay","dem_in","dem_out","td_in"].includes(action)&&!everything&&!(Number.isFinite(amt)&&amt>=.01&&amt<=1e6))throw bad("金額不正確（0.01–1,000,000）");
+  if(action==="td_break"&&!Number.isFinite(Number(at)))throw bad("參數錯誤");
   const pid=`players/${a.uid}`;
   return retry(async()=>{
     const p=await d.db.get(pid),now=d.now();
     await strikeIfDue(d,pid,p);
     if(action==="check")return {ok:true};
-    let r;try{r=action==="borrow"?L.borrow(p?p.data:{cash:START},amt,now):L.repay(p?p.data:{cash:START},amt,now,full);}
-    catch(e){throw new HttpError(409,"failed-precondition",e.message);}
-    await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash:r.cash,loan:r.loan},pre:p?p.version:null}]);
-    return {ok:true,cash:r.cash,owed:Math.round(L.owed(r.loan,now)*100)/100};
+    const data=p?p.data:{cash:START};
+    let upd;
+    try{
+      upd=action==="borrow"?L.borrow(data,amt,now):action==="repay"?L.repay(data,amt,now,everything)
+        :action==="dem_in"?L.demIn(data,amt,now):action==="dem_out"?L.demOut(data,amt,now,everything)
+        :action==="td_in"?L.tdIn(data,amt,now):L.tdBreak(data,Number(at),now);
+    }catch(e){throw new HttpError(409,"failed-precondition",e.message);}
+    await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),...upd},pre:p?p.version:null}]);
+    const after={...data,...upd},r2=n=>Math.round(n*100)/100;
+    return {ok:true,cash:upd.cash,owed:r2(L.owed(after.loan,now)),deposits:r2(L.depositsValue(after,now))};
   });
 }
 export async function route(req,env,d){
