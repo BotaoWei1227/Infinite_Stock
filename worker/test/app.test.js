@@ -15,6 +15,10 @@ const inj=(x={})=>({stockId:"fire",itemName:"火",iaToken:"tok12345",geminiKey:"
 const TR=(x={})=>({stockId:"fire",dir:1,...x});
 const BK=(x={})=>({...x});
 const MS=db=>db.m.get("market/state").data.stocks;
+import * as L from "../src/logic.js";
+const OD=db=>db.m.get("secret/odds").data;                 // 私密文件：機率偏移與活動影響
+const BIAS=(db,id="fire")=>OD(db).bias[id]?.v??0;           // 已寫入的偏移值（寫入當下）
+const EFF=(x,id="fire")=>L.effOdds(OD(x.db).bias[id],x.t.v); // 「現在」衰減後的偏移
 const P=db=>db.m.get("players/g1").data;
 const feeds=db=>[...db.m].filter(([k])=>k.startsWith("feed/")).map(([,v])=>v.data);
 
@@ -25,22 +29,22 @@ test("市場初始化（只做一次）",async()=>{
 test("投入：只改變機率、價格不跳動；玩家(以 Google uid 為鍵)/動態/綁定一次寫好，CORS 正確",async()=>{
   const {call,db}=mk();await call("/ensure-market");
   const r=await call("/inject",inj());
-  assert.equal(r.status,200);assert.equal(r.body.score,90);assert.equal(r.body.up,53);assert.equal(r.body.price,12);assert.equal(r.body.pass,true);assert.equal(r.body.threshold,70);
+  assert.equal(r.status,200);assert.equal(r.body.score,90);assert.equal("up" in r.body,false);assert.equal(r.body.price,12);assert.equal(r.body.pass,true);assert.equal(r.body.threshold,70);
   assert.equal(r.h.get("Access-Control-Allow-Origin"),"https://u.github.io");
-  const f=MS(db).fire;assert.ok(Math.abs(f.bias-.05*20/30)<1e-9);assert.deepEqual(f.p,[12]);assert.equal(f.t.length,1);assert.equal(f.last,"火（90分）");   // 沒有新的價格點
+  const f=MS(db).fire;assert.ok(Math.abs(BIAS(db)-.05*20/30)<1e-9);assert.equal("bias" in f,false);assert.equal("biasAt" in f,false);assert.deepEqual(f.p,[12]);assert.equal(f.t.length,1);assert.equal(f.last,"火（90分）");   // 沒有新的價格點
   assert.equal(MS(db).water.price,10);
   assert.equal(P(db).name,"測試工坊");assert.equal(P(db).cash,50);assert.deepEqual(P(db).hold,{});assert.ok(typeof P(db).used["n:火"]==="number");
-  assert.equal(feeds(db)[0].up,53);assert.equal(feeds(db)[0].pass,true);assert.equal("pct" in feeds(db)[0],false);assert.equal(feeds(db)[0].stock,"火");
+  assert.equal("up" in feeds(db)[0],false);assert.equal(feeds(db)[0].pass,true);assert.equal("pct" in feeds(db)[0],false);assert.equal(feeds(db)[0].stock,"火");
   assert.equal(db.m.get("links/g1").data.iaId,"iau_1");assert.equal(db.m.get("iaLinks/iau_1").data.uid,"g1");
 });
 test("無關造物提高下跌機率",async()=>{
   const {call,db}=mk({judge:async()=>({score:10,reason:"無關"})});await call("/ensure-market");
-  const r=await call("/inject",inj());assert.equal(r.body.up,46);assert.equal(r.body.pass,false);assert.ok(MS(db).fire.bias<0);
+  const r=await call("/inject",inj());assert.equal("up" in r.body,false);assert.equal(r.body.pass,false);assert.ok(BIAS(db)<0);
 });
 test("排程：每檔隨機走一步，偏移衰減；衝突會重試；缺市場時會建立",async()=>{
   const {call,db,d,t}=mk();await call("/ensure-market");await call("/inject",inj());
   t.v+=5*60*1000;await tick(d);
-  const f=MS(db).fire;assert.equal(f.t.length,2);assert.ok(Math.abs(f.bias-(.05*20/30)*.9)<1e-9);assert.equal(f.biasAt,t.v);assert.equal(MS(db).water.t.length,2);
+  const f=MS(db).fire;assert.equal(f.t.length,2);assert.ok(Math.abs(BIAS(db)-.05*20/30)<1e-9);assert.equal("bias" in f,false);assert.equal(MS(db).water.t.length,2);
   db.failNext=2;await tick(d);assert.equal(MS(db).water.t.length,3);
   const e=mk();await tick(e.d);assert.equal(Object.keys(MS(e.db)).length,6);
 });
@@ -169,25 +173,25 @@ test("開發者判斷：信箱未驗證、不在名單、名單為空、大小�
 
 test("買賣會推動走勢：買進推升、賣出壓低上漲機率；有上限；失敗的交易不影響；不直接改價格",async()=>{
   const {call,db}=mk();await call("/ensure-market");
-  await call("/trade",TR());assert.ok(Math.abs(MS(db).fire.bias-.01)<1e-9);assert.equal(MS(db).fire.price,12);assert.equal(MS(db).fire.p.length,1);
-  await call("/trade",TR({dir:-1}));assert.ok(Math.abs(MS(db).fire.bias)<1e-9);
-  assert.equal((await call("/trade",TR({dir:-1}))).status,409);assert.ok(Math.abs(MS(db).fire.bias)<1e-9);          // 沒持股賣不出去，不算
-  await call("/trade",TR({stockId:"water"}));assert.ok(Math.abs(MS(db).water.bias-.01)<1e-9);assert.ok(Math.abs(MS(db).fire.bias)<1e-9);   // 只影響該檔
+  await call("/trade",TR());assert.ok(Math.abs(BIAS(db)-.01)<1e-9);assert.equal(MS(db).fire.price,12);assert.equal(MS(db).fire.p.length,1);
+  await call("/trade",TR({dir:-1}));assert.ok(Math.abs(BIAS(db))<1e-9);
+  assert.equal((await call("/trade",TR({dir:-1}))).status,409);assert.ok(Math.abs(BIAS(db))<1e-9);          // 沒持股賣不出去，不算
+  await call("/trade",TR({stockId:"water"}));assert.ok(Math.abs(BIAS(db,"water")-.01)<1e-9);assert.ok(Math.abs(BIAS(db))<1e-9);   // 只影響該檔
   await call("/bank",BK({action:"borrow",amount:1000}));
-  for(let i=0;i<20;i++)await call("/trade",TR());assert.equal(MS(db).fire.bias,.15);                           // 買再多也只到 65%
+  for(let i=0;i<20;i++)await call("/trade",TR());assert.equal(BIAS(db),.15);                           // 買再多也只到 65%
   // 買賣沒有套利：連續買進再賣出，現金只會因為價格不變而回到原點（沒有憑空賺到的價差）
   const {call:c2,db:d2}=mk();await c2("/ensure-market");const cash0=50;await c2("/trade",TR());await c2("/trade",TR({dir:-1}));assert.equal(d2.m.get("players/g1").data.cash,cash0);
 });
 test("多人同時買賣會疊加但被上限擋住，且彼此不互相覆蓋",async()=>{
   const A=mk(),db=A.db;await A.call("/ensure-market");
   for(const [uid,name] of [["g1","甲"],["g2","乙"],["g3","丙"]]){A.state.uid=uid;A.state.name=name;await A.call("/trade",TR());}
-  assert.ok(Math.abs(MS(db).fire.bias-.03)<1e-9);assert.equal(["g1","g2","g3"].every(u=>db.m.get("players/"+u).data.hold.fire===1),true);
+  assert.ok(Math.abs(BIAS(db)-.03)<1e-9);assert.equal(["g1","g2","g3"].every(u=>db.m.get("players/"+u).data.hold.fire===1),true);
 });
 
 test("門檻：剛好等於 70 不算通過（沒有影響）；71 才通過",async()=>{
   for(const [sim,pass,bias] of [[70,false,0],[71,true,.05/30],[69,false,-.05/70]]){
     const {call,db}=mk({judge:async()=>({score:sim,reason:"x",relation:"strong"})});await call("/ensure-market");
-    const r=await call("/inject",inj());assert.equal(r.body.pass,pass,String(sim));assert.ok(Math.abs(MS(db).fire.bias-bias)<1e-9,String(sim));
+    const r=await call("/inject",inj());assert.equal(r.body.pass,pass,String(sim));assert.ok(Math.abs(BIAS(db)-bias)<1e-9,String(sim));
   }
 });
 
@@ -195,9 +199,9 @@ test("投入的機率提升每 5 分鐘降 10%（兩個方向都回到 50%），
   const M=300000;
   const up=mk({judge:async()=>({score:100,reason:"x",relation:"direct"})}),dn=mk({judge:async()=>({score:0,reason:"x",relation:"none"})});
   for(const x of [up,dn]){await x.call("/ensure-market");await x.call("/inject",inj());}
-  assert.ok(Math.abs(MS(up.db).fire.bias-.05)<1e-9);assert.ok(Math.abs(MS(dn.db).fire.bias+.05)<1e-9);
+  assert.ok(Math.abs(EFF(up)-.05)<1e-9);assert.ok(Math.abs(EFF(dn)+.05)<1e-9);
   const seen=[];
-  for(let i=1;i<=40;i++){for(const x of [up,dn]){x.t.v+=M;await tick(x.d);}seen.push([MS(up.db).fire.bias,MS(dn.db).fire.bias]);}
+  for(let i=1;i<=40;i++){for(const x of [up,dn]){x.t.v+=M;await tick(x.d);}seen.push([EFF(up),EFF(dn)]);}
   assert.ok(Math.abs(seen[0][0]-.045)<1e-9&&Math.abs(seen[0][1]+.045)<1e-9);                           // 5 分鐘後剩 90%
   assert.ok(Math.abs(seen[9][0]-.05*Math.pow(.9,10))<1e-9);                                           // 50 分鐘後
   assert.deepEqual(seen[39],[0,0]);                                                                   // 久了回到 50%
@@ -205,9 +209,9 @@ test("投入的機率提升每 5 分鐘降 10%（兩個方向都回到 50%），
   const a=mk({judge:async()=>({score:100,reason:"x",relation:"direct"})}),b=mk({judge:async()=>({score:100,reason:"x",relation:"direct"})});
   for(const x of [a,b]){await x.call("/ensure-market");await x.call("/inject",inj());}
   for(let i=0;i<5;i++){a.t.v+=120000;await tick(a.d);}b.t.v+=600000;await tick(b.d);
-  assert.ok(Math.abs(MS(a.db).fire.bias-MS(b.db).fire.bias)<1e-9);assert.ok(Math.abs(MS(a.db).fire.bias-.05*.81)<1e-9);
+  assert.ok(Math.abs(EFF(a)-EFF(b))<1e-9);assert.ok(Math.abs(EFF(a)-.05*.81)<1e-9);
   // 買賣疊加在「已衰減」的值上
-  b.t.v+=M;await b.call("/trade",TR());assert.ok(Math.abs(MS(b.db).fire.bias-(.05*.81*.9+.01))<1e-9);
+  b.t.v+=M;await b.call("/trade",TR());assert.ok(Math.abs(BIAS(b.db)-(.05*.81*.9+.01))<1e-9);
 });
 
 test("存款：活存/定存的存入、領出、利息、到期轉換、提前解約；不被其他操作覆蓋",async()=>{
@@ -244,4 +248,125 @@ test("黑道：連存款也一併被搶光",async()=>{
   assert.equal(P(db).tds.length,1);
   t.v+=25*H;const r=await call("/bank",BK({action:"dem_out",all:true}));assert.equal(r.status,409);assert.equal(r.body.error.code,"mob");
   assert.deepEqual([P(db).cash,P(db).dem.a,P(db).tds.length,P(db).loan.p],[50,0,0,0]);
+});
+
+// ================= 財經新聞 =================
+const PUB=(x={})=>({action:"publish",title:"央行宣布降息",body:"市場看好\n火系股票受惠",durationMin:60,effects:{fire:10},cash:0,...x});
+const NEWS=db=>[...db.m].filter(([k])=>k.startsWith("news/")).map(([k,v])=>({id:k.slice(5),...v.data}));
+test("財經新聞：只有開發者能發布；活動寫進新聞與行情",async()=>{
+  const {call,db,t,state}=asDev();await call("/ensure-market");
+  const r=await call("/news",PUB({cash:100}));assert.equal(r.status,200);assert.equal(r.body.endsAt,t.v+60*60000);
+  const n=NEWS(db)[0];assert.deepEqual([n.title,n.body,n.durationMin,n.cash,n.by,n.endsAt],["央行宣布降息","市場看好\n火系股票受惠",60,100,"Botao",t.v+3600000]);assert.equal(n.at,"TS");assert.equal("effects" in n,false);
+  const ev=OD(db).events;assert.equal(ev.length,1);assert.deepEqual([ev[0].id,ev[0].until,ev[0].shift],[n.id,t.v+3600000,{fire:.1}]);
+  const m=mk({devEmails:[DEV]});await m.call("/ensure-market");                                                    // 一般玩家
+  assert.equal((await m.call("/news",PUB())).status,403);assert.equal((await m.call("/news",{action:"end",id:n.id})).status,403);
+  const u=asDev();u.state.emailVerified=false;await u.call("/ensure-market");assert.equal((await u.call("/news",PUB())).status,403);   // 信箱未驗證
+  state.provider="anonymous";assert.equal((await call("/news",PUB())).status,401);
+  assert.equal((await asDev().call("/news",{action:"zzz"})).status,400);
+});
+test("財經新聞：輸入檢查",async()=>{
+  const {call,db}=asDev();await call("/ensure-market");
+  const bad=async x=>(await call("/news",PUB(x))).status;
+  assert.equal(await bad({title:""}),400);assert.equal(await bad({title:"x".repeat(41)}),400);assert.equal(await bad({title:"換\n行"}),400);assert.equal(await bad({title:5}),400);
+  assert.equal(await bad({body:"x".repeat(601)}),400);assert.equal(await bad({body:"控制\u0001字元"}),400);
+  for(const m of [0,0.5,43201,"abc",null,-5])assert.equal(await bad({durationMin:m}),400,String(m));
+  for(const e of [{fire:0},{fire:41},{fire:-41},{fire:1.5},{fire:"10"},{FIRE:10},{nosuch:10},{"f":5},[1,2]])assert.equal(await bad({effects:e}),400,JSON.stringify(e));
+  for(const c of [-1,1e6+1,"abc"])assert.equal(await bad({cash:c}),400,String(c));
+  assert.equal(await bad({effects:{fire:-40,water:40},cash:1e6}),200);assert.equal(await bad({effects:{},body:""}),200);               // 邊界值與純公告
+  assert.equal(await bad({durationMin:1}),200);assert.equal(await bad({durationMin:43200}),200);
+  assert.equal(OD(db).events.length,3);                                                                         // 純公告不佔用行情的活動名額
+  for(let i=0;i<17;i++)assert.equal(await bad({effects:{wind:1}}),200);assert.equal(await bad({effects:{wind:1}}),400);               // 同時最多 20 個有影響的活動
+  assert.equal(await bad({effects:{}}),200);
+});
+test("財經新聞：活動期間改變上漲基準機率，結束後自動恢復；排程會清掉過期活動",async()=>{
+  const A=asDev({rand:()=>.55});await A.call("/ensure-market");
+  const up=()=>MS(A.db).fire.price;
+  await A.call("/news",PUB({effects:{fire:10,water:-10},durationMin:10}));
+  A.t.v+=120000;await tick(A.d);                                                // 活動中：火 60%（0.55 會漲）、水 40%（0.55 會跌）、其他 50%（0.55 會跌）
+  assert.ok(up()>12);assert.ok(MS(A.db).water.price<10);assert.ok(MS(A.db).earth.price<8);
+  A.t.v+=10*60000;await tick(A.d);                                              // 活動已結束：火回到 50%（0.55 會跌），且活動被清除
+  assert.ok(MS(A.db).fire.price<up()+1e-9&&OD(A.db).events.length===0);
+  const p1=up();A.t.v+=120000;await tick(A.d);assert.ok(up()<p1);
+});
+test("財經新聞：多個活動疊加；投入造物回報的上漲機率包含活動",async()=>{
+  const A=asDev({rand:()=>.5});await A.call("/ensure-market");
+  await A.call("/news",PUB({effects:{fire:10}}));await A.call("/news",PUB({effects:{fire:5},title:"另一則"}));
+  const r=await A.call("/inject",inj());assert.equal(r.status,200);assert.equal(r.body.up,Math.round((.5+.15+.05*20/30)*100));   // 活動 +15、投入 +3.3
+  assert.ok(Math.abs(BIAS(A.db)-.05*20/30)<1e-9);                                                                       // 活動不會混進玩家的偏移
+});
+test("財經新聞：開發者可以提前結束活動",async()=>{
+  const {call,db,t}=asDev();await call("/ensure-market");
+  const {body:{id}}=await call("/news",PUB({cash:50}));t.v+=60000;
+  assert.equal((await call("/news",{action:"end",id})).status,200);
+  assert.equal(NEWS(db)[0].endsAt,t.v);assert.equal(OD(db).events.length,0);
+  assert.equal((await call("/news",{action:"claim",id})).status,409);                                       // 結束後不能再領
+  assert.equal((await call("/news",{action:"end",id:"00000000-0000-0000-0000-000000000000"})).status,404);
+  assert.equal((await call("/news",{action:"end",id:"../x"})).status,400);
+});
+test("普發現金：每位玩家在活動期間領一次，不需要 IA",async()=>{
+  const A=asDev();await A.call("/ensure-market");A.state.iaDown=true;
+  const {body:{id}}=await A.call("/news",PUB({effects:{},cash:100,durationMin:30}));
+  const U=(uid)=>{A.state.uid=uid;A.state.email="player@example.com";};
+  U("g7");let r=await A.call("/news",{action:"claim",id});assert.equal(r.status,200);assert.equal(r.body.amount,100);
+  assert.deepEqual([A.db.m.get("players/g7").data.cash,A.db.m.get("players/g7").data.name,Object.keys(A.db.m.get("players/g7").data.claims)],[150,"Botao",[id]]);   // 新玩家自動建檔
+  r=await A.call("/news",{action:"claim",id});assert.equal(r.status,409);assert.match(r.body.error.message,/已經領過/);
+  U("g8");assert.equal((await A.call("/news",{action:"claim",id})).status,200);assert.equal(A.db.m.get("players/g8").data.cash,150);          // 別人各領各的
+  A.t.v+=31*60000;U("g9");r=await A.call("/news",{action:"claim",id});assert.equal(r.status,409);assert.match(r.body.error.message,/已經結束/);   // 過期
+  A.state.email=DEV;const none=await A.call("/news",PUB({effects:{},cash:0}));assert.equal(none.status,200);U("g7");assert.equal((await A.call("/news",{action:"claim",id:none.body.id})).status,409);   // 沒現金的活動
+  assert.equal((await A.call("/news",{action:"claim",id:"nope"})).status,400);
+  assert.equal((await A.call("/news",{action:"claim",id:"11111111-1111-1111-1111-111111111111"})).status,409);
+  A.state.provider="anonymous";assert.equal((await A.call("/news",{action:"claim",id})).status,401);
+});
+test("普發現金：領取紀錄只留最近 100 筆；被黑道搶光後現金歸零但仍不能重領",async()=>{
+  const A=asDev();await A.call("/ensure-market");
+  const ids=[];for(let i=0;i<3;i++)ids.push((await A.call("/news",PUB({effects:{},cash:10,durationMin:43200,title:"活動"+i}))).body.id);
+  A.state.email="player@example.com";
+  for(const id of ids)assert.equal((await A.call("/news",{action:"claim",id})).status,200);
+  assert.equal(A.db.m.get("players/g1").data.cash,80);
+  await A.call("/bank",{action:"borrow",amount:300});A.t.v+=25*H;
+  assert.equal((await A.call("/news",{action:"claim",id:ids[0]})).status,409);                              // 先觸發黑道（欠款拖過一天）
+  assert.equal(A.db.m.get("players/g1").data.cash,50);
+  assert.equal((await A.call("/news",{action:"claim",id:ids[0]})).status,409);                              // 已領過的不能重領
+});
+
+// ================= 機率只有開發者看得到 =================
+const SECRET_KEYS=new Set(["bias","biasAt","events","shift","effects","up"]);
+const leaks=(o,path="")=>Object.entries(o||{}).flatMap(([k,v])=>[...(SECRET_KEYS.has(k)?[path+"/"+k]:[]),...(v&&typeof v==="object"&&!Array.isArray(v)?leaks(v,path+"/"+k):[])]);
+test("機率只有開發者看得到：公開文件（行情/新聞/動態/玩家）完全不含機率資訊",async()=>{
+  const A=asDev();await A.call("/ensure-market");
+  await A.call("/news",PUB({effects:{fire:10,water:-5},cash:20}));await A.call("/inject",inj());await A.call("/trade",TR());await A.call("/trade",TR({stockId:"water"}));
+  A.t.v+=120000;await tick(A.d);await A.call("/inject",inj({itemName:"雷"}));
+  const pub=[...A.db.m].filter(([k])=>!k.startsWith("secret/")&&!k.startsWith("links/")&&!k.startsWith("iaLinks/"));
+  assert.ok(pub.length>=5);
+  for(const [k,v] of pub)assert.deepEqual(leaks(v.data),[],k);
+  assert.ok(Object.keys(OD(A.db).bias).length>=2&&OD(A.db).events.length===1);                                    // 機率確實存在，只是在私密文件
+});
+test("/odds：只有開發者能查；一般玩家、未驗證信箱、匿名都不行",async()=>{
+  const D=asDev();await D.call("/ensure-market");await D.call("/news",PUB({effects:{fire:10}}));await D.call("/inject",inj());
+  const r=await D.call("/odds");assert.equal(r.status,200);assert.equal(r.body.now,D.t.v);assert.ok(Math.abs(r.body.bias.fire.v-.05*20/30)<1e-9);
+  assert.equal(r.body.events.length,1);assert.deepEqual(r.body.events[0].shift,{fire:.1});
+  D.t.v+=3700000;assert.equal((await D.call("/odds")).body.events.length,0);                                       // 過期活動不回傳
+  const P=mk({devEmails:[DEV]});await P.call("/ensure-market");assert.equal((await P.call("/odds")).status,403);
+  const U=asDev();U.state.emailVerified=false;await U.call("/ensure-market");assert.equal((await U.call("/odds")).status,403);
+  const N=asDev();await N.call("/ensure-market");N.state.provider="anonymous";assert.equal((await N.call("/odds")).status,401);
+});
+test("投入結果：只有開發者會收到上漲機率",async()=>{
+  const D=asDev();await D.call("/ensure-market");
+  const r=await D.call("/inject",inj());assert.equal(r.body.up,53);
+  const P=mk();await P.call("/ensure-market");assert.equal("up" in (await P.call("/inject",inj())).body,false);
+});
+test("純資訊活動（例如前情公告）：沒有影響、沒有現金，只是一則新聞",async()=>{
+  const D=asDev();await D.call("/ensure-market");
+  const r=await D.call("/news",{action:"publish",title:"前情提要",body:"很久很久以前…",durationMin:1440});assert.equal(r.status,200);   // 不帶 effects / cash
+  const n=NEWS(D.db)[0];assert.deepEqual([n.title,n.cash,"effects" in n],["前情提要",0,false]);
+  assert.equal(OD(D.db).events.length,0);                                                                          // 不影響行情，也不佔活動名額
+  D.state.email="player@example.com";assert.equal((await D.call("/news",{action:"claim",id:n.id})).status,409);   // 沒有現金可領
+});
+test("舊資料搬家：機率偏移/活動從公開行情搬進私密文件，並把公開欄位清掉",async()=>{
+  const A=mk();await A.call("/ensure-market");
+  const m=A.db.m.get("market/state");                                                                              // 模擬舊版資料
+  m.data.stocks.fire={...m.data.stocks.fire,bias:.1,biasAt:A.t.v};m.data.events=[{id:"e1",until:A.t.v+9e6,shift:{fire:.2}}];A.db.m.delete("secret/odds");
+  await tick(A.d);
+  assert.deepEqual(leaks(A.db.m.get("market/state").data),[]);
+  assert.ok(Math.abs(OD(A.db).bias.fire.v-.1)<1e-9);assert.equal(OD(A.db).events[0].id,"e1");assert.equal(MS(A.db).fire.t.length,2);
 });

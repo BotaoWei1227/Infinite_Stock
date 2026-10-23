@@ -1,5 +1,5 @@
 import test from "node:test";import assert from "node:assert";
-import {demValue,tdValue,tdEnd,settle,depositsValue,demIn,demOut,tdIn,tdBreak,DEM_RATE,TD_RATE,TD_DAYS,MAX_TDS,effBias,DECAY,DECAY_MS,SIM_THRESHOLD,passes,upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,TRADE_NUDGE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
+import {effOdds,activeEvents,eventShift,markClaim,MAX_SHIFT,MAX_EVENTS,demValue,tdValue,tdEnd,settle,depositsValue,demIn,demOut,tdIn,tdBreak,DEM_RATE,TD_RATE,TD_DAYS,MAX_TDS,effBias,DECAY,DECAY_MS,SIM_THRESHOLD,passes,upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,TRADE_NUDGE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
 const near=(a,b,e=1e-9)=>Math.abs(a-b)<e;
 const S=(o={})=>({price:12,base:12,bias:0,t:[0],p:[12],...o});
 test("相似度門檻：要高過 70 才算相關；越高於/低於門檻影響越大；等於門檻沒有影響",()=>{
@@ -16,20 +16,20 @@ test("相似度門檻：要高過 70 才算相關；越高於/低於門檻影響
 test("走一步：機率決定方向，幅度 0.3–1.5%",()=>{
   assert.equal(step(S(),.4,.5,1).price,12.11);   // r1<0.5 → 漲
   assert.equal(step(S(),.6,.5,1).price,11.89);   // r1>0.5 → 跌
-  assert.equal(step(S({bias:.3}),.7,.5,1).price,12.11); // 偏移 +0.3 → 上漲機率 80%，0.7 仍漲
-  assert.equal(step(S({bias:-.3}),.4,.5,1).price,11.89); // 偏移 -0.3 → 上漲機率 20%，0.4 反而跌
+  assert.equal(step(S(),.7,.5,1,.3).price,12.11); // 偏移 +0.3 → 上漲機率 80%，0.7 仍漲
+  assert.equal(step(S(),.4,.5,1,-.3).price,11.89); // 偏移 -0.3 → 上漲機率 20%，0.4 反而跌
   const lo=step(S(),.4,0,1).price/12-1,hi=step(S(),.4,1,1).price/12-1;
   assert.ok(lo>=.0029&&hi<=.0151);
 });
-test("價格下限 1；均值回歸；走一步時偏移會先衰減到現在",()=>{
-  assert.ok(near(step(S({bias:.3,biasAt:0}),.5,.5,5*60*1000).bias,.27));
-  assert.equal(step(S({bias:.004}),.5,.5,1).bias,0);
+test("價格下限 1；均值回歸；公開行情不含機率欄位；私密偏移按時間衰減",()=>{
   assert.equal(step(S({price:1,base:1}),.9,.5,1).price,1);
-  const r=step(S({price:24}),.1,.5,1).price;assert.ok(r>24&&r<24*1.009); // 價格偏高時，上漲被壓制
+  const r=step(S({price:24}),.1,.5,1).price;assert.ok(r>24&&r<24*1.009);
+  const n=step(S({bias:.3,biasAt:0}),.4,.5,1);assert.equal("bias" in n,false);assert.equal("biasAt" in n,false);   // 舊欄位也會被清掉
+  assert.ok(near(effOdds({v:.1,at:0},5*60*1000),.09));assert.equal(effOdds(undefined,5),0);
 });
 test("走勢點保留最近 MAXH 個，並可附上說明文字",()=>{
   const s=S({t:Array.from({length:MAXH},(_,i)=>i),p:Array.from({length:MAXH},()=>12)});
-  const n=step(s,.4,.5,999,"火（90分）");
+  const n=step(s,.4,.5,999,0,0,"火（90分）");
   assert.equal(n.t.length,MAXH);assert.equal(n.t.at(-1),999);assert.equal(n.p.length,MAXH);assert.equal(n.last,"火（90分）");
 });
 test("買賣",()=>{
@@ -144,4 +144,20 @@ test("存款：存入/領出/定存/提前解約（只退本金）與各種錯�
   r=tdBreak(withTd,t0,t0+D);assert.equal(r.cash,100);assert.deepEqual(r.tds,[]);        // 提前解約：只退本金，1 天的利息作廢
   assert.throws(()=>tdBreak(withTd,t0+1,t0+D),/找不到/);
   assert.throws(()=>tdBreak(withTd,t0,t0+4*D),/找不到/);                                // 已到期轉入活存，不能再「解約」
+});
+
+test("財經新聞活動：期間內才有效；多個活動相加；走一步時套用基準機率偏移",()=>{
+  const now=1e13,ev=[{id:"a",until:now+1000,shift:{fire:.1,water:-.2}},{id:"b",until:now+5000,shift:{fire:.05}},{id:"c",until:now-1,shift:{fire:.4}}];
+  assert.ok(near(eventShift(ev,"fire",now),.15));assert.ok(near(eventShift(ev,"water",now),-.2));assert.equal(eventShift(ev,"wind",now),0);
+  assert.ok(near(eventShift(ev,"fire",now+2000),.05));assert.equal(eventShift(ev,"fire",now+9999),0);                 // 活動結束後自動失效
+  assert.deepEqual(activeEvents(ev,now).map(e=>e.id),["a","b"]);assert.deepEqual(activeEvents(undefined,now),[]);assert.equal(eventShift(undefined,"fire",now),0);
+  assert.equal(MAX_SHIFT,40);assert.equal(MAX_EVENTS,20);
+  const S0={price:12,base:12,bias:0,t:[0],p:[12]};
+  assert.ok(step(S0,.45,.5,1,0,0).price>12);                                  // 沒活動：r1 小於上漲機率(50%) 才會漲
+  assert.ok(step(S0,.55,.5,1,0,0).price<12);assert.ok(step(S0,.55,.5,1,0,.1).price>12);               // 活動 +10：上漲機率 60%，0.55 就會漲
+  assert.ok(step(S0,.45,.5,1,0,-.1).price<12);                                                              // 活動 −10：上漲機率 40%，0.45 就會跌
+  assert.ok(step(S0,.65,.5,1,.1,.1).price>12);assert.ok(step(S0,.75,.5,1,.1,.1).price<12);   // 與玩家偏移疊加（70%）
+  assert.ok(step(S0,.89,.5,1,0,.9).price>12);assert.ok(step(S0,.91,.5,1,0,.9).price<12);              // 總機率仍被限制在 10%–90%
+  let c=markClaim({},"x",5);assert.deepEqual(c,{x:5});
+  for(let i=0;i<150;i++)c=markClaim(c,"e"+i,10+i);assert.equal(Object.keys(c).length,100);assert.ok("e149" in c&&!("x" in c));
 });

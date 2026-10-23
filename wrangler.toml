@@ -8,7 +8,7 @@ preview_urls = false
 [assets]
 directory = "./public/"
 binding = "ASSETS"
-run_worker_first = ["/inject", "/trade", "/bank", "/whoami", "/ensure-market"]
+run_worker_first = ["/inject", "/trade", "/bank", "/news", "/odds", "/whoami", "/ensure-market"]
 
 # 每 2 分鐘讓行情自己隨機走一步
 [triggers]

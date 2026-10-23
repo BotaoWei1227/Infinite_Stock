@@ -1,10 +1,13 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{db}/documents {
-    // 公開唯讀；所有寫入只能由 Cloud Functions（Admin SDK）完成。
-    // links / iaLinks（Google ↔ 工坊綁定）不開放任何客戶端存取。
+    // 公開唯讀；所有寫入只能由 Cloudflare Worker（服務帳戶）完成。
+    // 下面沒列出的集合一律預設拒絕，包含：
+    //   links / iaLinks（Google ↔ 工坊綁定）
+    //   secret（玩家的機率偏移與財經活動影響：只有開發者能透過 Worker 查看）
     match /market/{id}  { allow read: if true; allow write: if false; }
     match /players/{id} { allow read: if true; allow write: if false; }
     match /feed/{id}    { allow read: if true; allow write: if false; }
+    match /news/{id}    { allow read: if true; allow write: if false; }
   }
 }

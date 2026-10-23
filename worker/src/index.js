@@ -2,7 +2,7 @@ import {route,tick} from "./app.js";
 import {makeDb} from "./firestore.js";
 import {verifyFirebaseToken} from "./auth.js";
 import {iaClient,judge} from "./ia.js";
-const API=new Set(["/inject","/trade","/bank","/whoami","/ensure-market"]);
+const API=new Set(["/inject","/trade","/bank","/news","/odds","/whoami","/ensure-market"]);
 const deps=env=>({
   db:makeDb(env),
   verify:r=>verifyFirebaseToken(r,env),

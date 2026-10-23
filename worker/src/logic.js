@@ -16,12 +16,15 @@ export const SIM_THRESHOLD=70;
 export const passes=sim=>sim>SIM_THRESHOLD;
 export const nudge=(bias,sim)=>clamp((bias||0)+(passes(sim)?(sim-SIM_THRESHOLD)/(100-SIM_THRESHOLD):-(SIM_THRESHOLD-sim)/SIM_THRESHOLD)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
 export const tradeNudge=(bias,dir)=>clamp((bias||0)+dir*TRADE_NUDGE,-BIAS_CAP,BIAS_CAP);
-// 行情走一步：方向隨機（上漲機率 = .5+衰減後的 bias），幅度 0.3–1.5%，加微弱均值回歸避免漂離基準價
-export function step(s,r1,r2,now,last){
-  const bias=effBias(s,now),up=r1<upProb(bias),mag=.003+r2*.012,pull=.01*Math.log(s.base/s.price);
+// 私密機率紀錄 rec＝{v:偏移, at:時間}（存在只有伺服器讀得到的文件）；回傳「現在」衰減後的偏移
+export const effOdds=(rec,now)=>rec?effBias({bias:rec.v,biasAt:rec.at},now):0;
+// 行情走一步：方向隨機（上漲機率 = .5+衰減後的偏移 bias+活動基準偏移 shift），幅度 0.3–1.5%，加微弱均值回歸避免漂離基準價。
+// 回傳的股票只含公開欄位（機率資訊絕不放進公開行情）
+export function step(s,r1,r2,now,bias=0,shift=0,last){
+  const {bias:_b,biasAt:_a,...pub}=s;
+  const up=r1<upProb(bias+shift),mag=.003+r2*.012,pull=.01*Math.log(s.base/s.price);
   const price=clamp(rd(s.price*(1+(up?mag:-mag)+pull)),1,s.base*5);
-  return {...s,price,bias,biasAt:now,
-    t:[...(s.t||[]),now].slice(-MAXH),p:[...(s.p||[]),price].slice(-MAXH),...(last!==undefined?{last}:{})};
+  return {...pub,price,t:[...(s.t||[]),now].slice(-MAXH),p:[...(s.p||[]),price].slice(-MAXH),...(last!==undefined?{last}:{})};
 }
 export function trade(d,id,price,dir){
   const n=d.hold?.[id]||0;
@@ -120,4 +123,16 @@ export function tdBreak(d,at,now){
   const s=settle(d,now),td=s.tds.find(x=>x.t===at);
   if(!td)throw new Error("找不到這筆定存（可能已到期，轉入活存了）");
   return {cash:cents(d.cash+td.p),dem:s.dem,tds:s.tds.filter(x=>x!==td)};
+}
+
+// ---- 財經新聞活動：活動期間，把指定股票的「上漲基準機率」從 50% 改成 50±x%（玩家的投入/買賣偏移再疊加其上）
+// 市場文件的 events：[{id, until, shift:{股票:±0.x}}]，行情排程只讀這份，不必另外查活動
+export const MAX_SHIFT=40,MAX_EVENTS=20;
+export const activeEvents=(events,now)=>(events||[]).filter(e=>e&&e.until>now);
+export const eventShift=(events,id,now)=>{let x=0;for(const e of events||[])if(e&&e.until>now)x+=(e.shift&&e.shift[id])||0;return x;};
+// 普發現金的領取紀錄（玩家文件的 claims：活動 id → 領取時間），只留最近 100 筆
+export function markClaim(c,id,now){
+  const m={...(c||{}),[id]:now},keys=Object.keys(m);
+  if(keys.length>100)keys.sort((a,b)=>m[a]-m[b]).slice(0,keys.length-100).forEach(k=>delete m[k]);
+  return m;
 }

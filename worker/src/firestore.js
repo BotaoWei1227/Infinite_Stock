@@ -59,7 +59,8 @@ export function makeDb(env,fetchFn=fetch){
     // ops: [{path, data, ts:[欄位], pre}]；pre=null 代表必須不存在，字串代表 updateTime 必須相符；整批原子提交
     async commit(ops){
       const writes=ops.map(o=>{
-        const w={update:{name:`${root}/documents/${o.path}`,fields:encode(o.data||{}).mapValue.fields},updateMask:{fieldPaths:Object.keys(o.data||{})}};
+        const ent=Object.entries(o.data||{});   // 值為 undefined 的欄位＝刪除（在 updateMask 裡、但不放進 fields）
+        const w={update:{name:`${root}/documents/${o.path}`,fields:encode(Object.fromEntries(ent.filter(([,v])=>v!==undefined))).mapValue.fields},updateMask:{fieldPaths:ent.map(([k])=>k)}};
         if(o.ts?.length)w.updateTransforms=o.ts.map(f=>({fieldPath:f,setToServerValue:"REQUEST_TIME"}));
         if(o.pre===null)w.currentDocument={exists:false};else if(o.pre)w.currentDocument={updateTime:o.pre};
         return w;

@@ -38,3 +38,13 @@ test("陣列（走勢點）編碼/解碼來回一致",()=>{
   assert.deepEqual(decode(encode(o)),o);
   assert.deepEqual(encode([1,2.5]),{arrayValue:{values:[{integerValue:"1"},{doubleValue:2.5}]}});
 });
+
+test("欄位值為 undefined → 刪除該欄位（在 updateMask 中但不送出值）",async()=>{
+  _resetToken();
+  const kp=await crypto.subtle.generateKey({name:"RSASSA-PKCS1-v1_5",modulusLength:2048,publicExponent:new Uint8Array([1,0,1]),hash:"SHA-256"},true,["sign"]);
+  const der=new Uint8Array(await crypto.subtle.exportKey("pkcs8",kp.privateKey));
+  const env={FIREBASE_PROJECT_ID:"p",FIREBASE_SA:JSON.stringify({client_email:"a@b",private_key:"-----BEGIN PRIVATE KEY-----\n"+btoa(String.fromCharCode(...der))+"\n-----END PRIVATE KEY-----"})};
+  let body;const f=async(u,o)=>{if(String(u).includes("oauth2"))return {ok:true,json:async()=>({access_token:"T",expires_in:3600})};body=JSON.parse(o.body);return {ok:true,status:200,json:async()=>({})};};
+  await makeDb(env,f).commit([{path:"market/state",data:{stocks:{a:1},events:undefined},pre:"t"}]);
+  const w=body.writes[0];assert.deepEqual(w.updateMask.fieldPaths,["stocks","events"]);assert.deepEqual(Object.keys(w.update.fields),["stocks"]);
+});

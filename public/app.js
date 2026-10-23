@@ -8,7 +8,7 @@ const $=id=>document.getElementById(id),S=sessionStorage;
 const fmt=n=>(Math.round(n*100)/100).toFixed(2);
 let hinting=true;
 const say=t=>{hinting=false;$("msg").textContent=t;};
-let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="";
+let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="",odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0;
 
 // ---------- OAuth：Authorization Code + PKCE S256（瀏覽器端） ----------
 const b64u=b=>btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
@@ -92,15 +92,27 @@ async function inject(id){
   if(!itemName)return say(isDev?"請選擇造物，或在上方輸入造物名稱":"請先選擇要投入的造物");
   if(!S.getItem("gk")){say("請先到右上角 ⚙ 設定 Google API Key");$("settings").showModal?.();return;}
   const r=await act("inject",{stockId:id,itemName,geminiKey:S.getItem("gk")});
-  if(r){item=null;say(`相似度 ${r.score}${REL[r.relation]?"（"+REL[r.relation]+"）":""}：${r.reason}｜${r.pass?`超過門檻 ${r.threshold}，提高`:`沒超過門檻 ${r.threshold}，降低`}${stocks[id]?.name||""}的上漲機率，現在是 ${r.up}%`);render();}
+  if(r){item=null;say(`相似度 ${r.score}${REL[r.relation]?"（"+REL[r.relation]+"）":""}：${r.reason}｜${r.pass?`超過門檻 ${r.threshold}，提高`:`沒超過門檻 ${r.threshold}，降低`}${stocks[id]?.name||""}的上漲機率${r.up!=null?`（現在 ${r.up}%・僅開發者可見）`:""}`);render();}
 }
 const trade=async(id,dir)=>{const r=await act("trade",{stockId:id,dir});if(r)say(`已${dir>0?"買入":"賣出"} 1 股${stocks[id]?.name||""}`);};
+// 上漲機率只有開發者看得到：資料放在伺服器的私密文件，開發者才能用 /odds 取得（一般玩家的瀏覽器裡根本沒有這些資料）
 const DECAY_MS=3e5,DECAY=.9;   // 機率提升每 5 分鐘只剩 90%（須與伺服器 worker/src/logic.js 一致）
-const effBiasClient=s=>{const b=s.bias||0;if(!b)return 0;const e=b*Math.pow(DECAY,Math.max(0,Date.now()-(s.biasAt??Date.now()))/DECAY_MS);return Math.abs(e)<.005?0:e;};
-const upPct=s=>Math.round(Math.min(.9,Math.max(.1,.5+effBiasClient(s)))*100);
-function refreshGauges(){   // 兩次行情更新之間，機率條也會慢慢回到 50%
-  document.querySelectorAll(".gi").forEach(i=>{const s=stocks[i.dataset.id];if(s)i.style.width=upPct(s)+"%";});
-  document.querySelectorAll(".gp").forEach(b=>{const s=stocks[b.dataset.id];if(s)b.textContent=upPct(s)+"%";});
+const nowS=()=>Date.now()+skew;
+const effOddsC=rec=>{if(!rec||!rec.v)return 0;const e=rec.v*Math.pow(DECAY,Math.max(0,nowS()-rec.at)/DECAY_MS);return Math.abs(e)<.005?0:e;};
+const shiftC=id=>{let x=0;for(const e of odds?.events||[])if(e.until>nowS())x+=(e.shift&&e.shift[id])||0;return x;};
+const upPct=id=>Math.round(Math.min(.9,Math.max(.1,.5+effOddsC(odds?.bias?.[id])+shiftC(id)))*100);
+function refreshGauges(){   // 兩次更新之間，機率條也會慢慢回到 50%
+  if(!isDev||!odds)return;
+  document.querySelectorAll(".gi").forEach(i=>{i.style.width=upPct(i.dataset.id)+"%";});
+  document.querySelectorAll(".gp").forEach(b=>{b.textContent=upPct(b.dataset.id)+"%";});
+}
+async function fetchOdds(){
+  if(!isDev||!user)return;
+  try{
+    const r=await fetch(CFG.api+"/odds",{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken()}});
+    if(!r.ok)return;
+    const j=await r.json();odds=j;skew=j.now-Date.now();render();
+  }catch{}
 }
 const DAYMS=864e5,RATE=.05,MOB_LIMIT=100;
 // 存款（須與伺服器 worker/src/logic.js 一致）：活存日利率 0.4%；定存日利率 1.2%、鎖 3 天，到期自動轉入活存
@@ -181,7 +193,7 @@ function renderMarket(){
   if(!ids.length){mk.append(el("p",{class:"mu",text:"行情載入中…"}));return;}
   for(const id of ids){
     const s=stocks[id],open=!collapsed.has(id),first=(s.p&&s.p[0])||s.price,ch=(s.price/first-1)*100,chTxt=(ch>=0?"+":"")+ch.toFixed(2)+"%";
-    const upP=upPct(s),n=me.hold?.[id]||0;
+    const n=me.hold?.[id]||0;
     const w=el("section",{class:"win stock"+(open?"":" shut"),"aria-label":s.name});
     w.append(winBar(`${s.emoji} ${id.toUpperCase()}.EXE`,[
       ...(open?[]:[el("span",{class:"bt "+(ch>=0?"up":"dn"),text:`${fmt(s.price)} ${chTxt}`})]),
@@ -192,7 +204,7 @@ function renderMarket(){
     b.append(
       el("div",{class:"hd"},el("span",{class:"nm",text:s.name}),el("span",{class:"px big",text:fmt(s.price)}),el("span",{class:"chg "+(ch>=0?"up":"dn"),text:chTxt})),
       chart(s),
-      el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{class:"gi","data-id":id,style:`width:${upP}%`})),el("b",{class:"gp","data-id":id,text:upP+"%"})),
+      ...(isDev&&odds?[el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率 🔒"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{class:"gi","data-id":id,style:`width:${upPct(id)}%`})),el("b",{class:"gp","data-id":id,text:upPct(id)+"%"}))]:[]),
       el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}`}),
       el("div",{class:"acts"},
         el("button",{class:"px-btn",type:"button",disabled:busy,text:"買 1",onclick:()=>trade(id,1)}),
@@ -202,6 +214,85 @@ function renderMarket(){
   }
 }
 
+// ---------- 財經新聞 ----------
+// 玩家只看得到：名稱、內容、時間、普發現金。活動對機率的影響只有開發者看得到。
+function newsTime(n){const t=n.at?.toDate?.();return t?t.toLocaleString("zh-TW",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false}):"";}
+const fxText=e=>Object.entries(e.shift||{}).map(([id,x])=>`${stocks[id]?.name||id} ${x>0?"+":"−"}${Math.round(Math.abs(x)*100)}`).join("、");
+function updateNewsTimes(){document.querySelectorAll(".ntime").forEach(s=>{const left=Number(s.dataset.end)-nowS();s.textContent=left>0?"進行中・剩 "+hmLeft(left):"已結束";});}
+function newsWin(n){
+  const active=n.endsAt>nowS(),claimed=!!(me.claims&&Object.hasOwn(me.claims,n.id)),ev=(odds?.events||[]).find(e=>e.id===n.id);
+  const w=el("section",{class:"win news"+(active?"":" ended"),"aria-label":n.title});
+  w.append(winBar("📰 "+n.title,[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
+  const b=el("div",{class:"body"});
+  b.append(el("div",{class:"meta"},document.createTextNode(`${newsTime(n)}　`),el("span",{class:"ntime","data-end":String(n.endsAt),text:active?"進行中":"已結束"})));
+  if(n.body)b.append(el("div",{class:"nbody",text:n.body}));
+  if(n.cash>0)b.append(el("div",{class:"cash"},el("span",{text:`💰 普發現金：每人 ${fmt(n.cash)}`}),
+    claimed?el("b",{class:"mu",text:"✓ 已領取"}):active?el("button",{class:"px-btn pri",type:"button",disabled:busy,text:"領取",onclick:()=>claimCash(n)}):el("span",{class:"mu",text:"已結束"})));
+  if(isDev){
+    if(ev)b.append(el("div",{class:"fxinfo",text:`🔒 活動影響（只有你看得到）：${fxText(ev)}`}));
+    if(active)b.append(el("button",{class:"px-btn sm",type:"button",disabled:busy,text:"提前結束活動",onclick:()=>endNews(n)}));
+  }
+  w.append(b);return w;
+}
+async function claimCash(n){const r=await act("news",{action:"claim",id:n.id});if(r)say(`已領取普發現金 ${fmt(r.amount)}`);}
+async function endNews(n){if(!confirm(`提前結束「${n.title}」？活動的機率影響會立刻消失。`))return;const r=await act("news",{action:"end",id:n.id});if(r){say("已提前結束活動");fetchOdds();}}
+let newsSig="";
+function renderNews(){
+  const form=$("nform");
+  if(isDev&&!form.firstChild)buildNewsForm(form);
+  if(!isDev&&form.firstChild){form.replaceChildren();nf=null;}
+  if(nf)syncEffRows();
+  const sig=JSON.stringify([newsList.map(n=>[n.id,n.endsAt>nowS(),!!(me.claims&&Object.hasOwn(me.claims,n.id))]),isDev,(odds?.events||[]).map(e=>e.id),newsErr,busy,!!user]);
+  const list=$("nlist");
+  if(sig!==newsSig){
+    newsSig=sig;list.replaceChildren();
+    if(newsErr)list.append(el("p",{class:"warn",text:"新聞載入失敗。請確認 Firestore 規則已更新（需要允許讀取 news 集合）。"}));
+    else if(!newsList.length)list.append(el("p",{class:"mu",text:"目前沒有任何新聞。"}));
+    newsList.forEach(n=>list.append(newsWin(n)));
+  }
+  updateNewsTimes();
+}
+// 開發者發布表單：只建一次，不會因為行情更新而被清掉正在輸入的內容
+function buildNewsForm(host){
+  nf={title:el("input",{class:"px-in",id:"ntitle",maxlength:"40",placeholder:"活動名稱（最多 40 字）","aria-label":"活動名稱"}),
+    body:el("textarea",{class:"px-in",id:"nbody",rows:"4",maxlength:"600",placeholder:"活動資料（可留空；只寫文字也行，例如前情公告）","aria-label":"活動資料"}),
+    dur:el("input",{class:"px-in",id:"ndur",type:"number",inputmode:"decimal",min:"1",value:"1","aria-label":"活動持續時間"}),
+    unit:el("select",{class:"px-sel","aria-label":"時間單位"},new Option("分鐘","1"),new Option("小時","60"),new Option("天","1440")),
+    cash:el("input",{class:"px-in",id:"ncash",type:"number",inputmode:"decimal",min:"0",step:"0.01",placeholder:"0（不發就留空）","aria-label":"普發現金"}),
+    box:el("div"),eff:{},sig:""};
+  nf.unit.value="60";
+  const w=el("section",{class:"win","aria-label":"發布活動"});
+  w.append(winBar("🛠 PUBLISH.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
+  w.append(el("div",{class:"body"},
+    el("p",{class:"mu",text:"只有開發者看得到這個表單。活動影響與機率只有你看得到，玩家只會看到名稱、內容、時間與現金。"}),
+    el("label",{class:"lbl",for:"ntitle",text:"活動名稱"}),nf.title,
+    el("label",{class:"lbl",for:"nbody",text:"活動資料"}),nf.body,
+    el("label",{class:"lbl",for:"ndur",text:"活動持續時間"}),el("div",{class:"unit"},nf.dur,nf.unit),
+    el("h2",{class:"h2",text:"活動影響（可個別選擇）"}),
+    el("p",{class:"mu",text:"活動期間，把該股票「上漲的基準機率」改成 50+x（漲）或 50−x（跌）；x 是 1～40 的整數。不選＝不影響。"}),
+    nf.box,
+    el("label",{class:"lbl",for:"ncash",text:"普發現金（每位玩家領一次，活動期間內有效）"}),nf.cash,
+    el("div",{class:"row"},el("button",{class:"px-btn pri",type:"button",text:"發布活動",onclick:publishNews}))));
+  host.append(w);syncEffRows();
+}
+function syncEffRows(){
+  const ids=Object.keys(stocks).sort(),sig=ids.join(",");
+  if(sig===nf.sig)return;nf.sig=sig;nf.box.replaceChildren();
+  for(const id of ids){
+    const sel=el("select",{class:"px-sel","aria-label":`${stocks[id].name} 的影響`},new Option("— 無","0"),new Option("▲ 漲 +x","1"),new Option("▼ 跌 −x","-1"));
+    const num=el("input",{class:"px-in",type:"number",inputmode:"numeric",min:"1",max:"40",step:"1",value:"10",disabled:true,"aria-label":`${stocks[id].name} 的 x（百分點）`});
+    sel.onchange=()=>{num.disabled=sel.value==="0";};
+    nf.eff[id]={sel,num};nf.box.append(el("div",{class:"fx"},el("span",{text:`${stocks[id].emoji} ${stocks[id].name}`}),sel,num));
+  }
+}
+async function publishNews(){
+  const title=nf.title.value.trim(),mins=parseFloat(nf.dur.value)*parseFloat(nf.unit.value),cash=parseFloat(nf.cash.value)||0,effects={};
+  if(!title)return say("請輸入活動名稱");
+  if(!(mins>=1))return say("請輸入活動持續時間");
+  for(const [id,c] of Object.entries(nf.eff)){const dir=Number(c.sel.value);if(!dir)continue;const x=parseInt(c.num.value);if(!(x>=1&&x<=40))return say("活動影響的 x 要是 1～40 的整數");effects[id]=dir*x;}
+  const r=await act("news",{action:"publish",title,body:nf.body.value,durationMin:mins,effects,cash});
+  if(r){say(`已發布活動「${title}」`);nf.title.value="";nf.body.value="";nf.cash.value="";nf.dur.value="1";nf.unit.value="60";for(const c of Object.values(nf.eff)){c.sel.value="0";c.num.disabled=true;c.num.value="10";}fetchOdds();}
+}
 // ---------- 銀行 ----------
 const bk={},sv={};
 function buildBank(){
@@ -303,7 +394,7 @@ function renderSet(){
   v.append(w);
 }
 // ---------- 分頁 ----------
-const VIEWS={trade:"v-trade",bank:"v-bank",work:"v-work",set:"v-set"},HASH={trade:"",bank:"#bank",work:"#work",set:"#settings"};
+const VIEWS={trade:"v-trade",news:"v-news",bank:"v-bank",work:"v-work",set:"v-set"},HASH={trade:"",news:"#news",bank:"#bank",work:"#work",set:"#settings"};
 function setView(v){
   if(!VIEWS[v])v="trade";view=v;
   for(const [k,id] of Object.entries(VIEWS))$(id).hidden=k!==v;
@@ -315,6 +406,7 @@ function render(){
   if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：可以在造物視窗直接打字輸入造物名稱":!token?"買賣與銀行可以直接玩；連結《無限煉製》帳號才能投入造物":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」":"";
   renderStrip();
   if(view==="trade"){renderCraft();renderMarket();}
+  else if(view==="news")renderNews();
   else if(view==="bank")updateBank();
   else if(view==="work")renderWork();
   else renderSet();
@@ -324,7 +416,7 @@ function wireNav(){
   $("menu").onclick=()=>dr.showModal();$("dclose").onclick=()=>dr.close();
   dr.addEventListener("click",e=>{if(e.target===dr)dr.close();});
   dr.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>{dr.close();setView(b.dataset.v);});
-  setInterval(()=>{refreshGauges();checkMob();if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
+  setInterval(()=>{refreshGauges();if(isDev&&++oddsTick%4===0)fetchOdds();if(view==="news")updateNewsTimes();checkMob();if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
 }
 function renderFeed(rows){
   const f=$("feed");f.replaceChildren();
@@ -332,7 +424,7 @@ function renderFeed(rows){
   rows.forEach(x=>{const t=x.at?.toDate?.();const hm=t?t.toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false}):"";
     if(x.mob){f.append(el("div",{class:"mob"},document.createTextNode(`☠ ${x.who} 欠款 ${fmt(x.owed)} 拖過一天，被黑道找上門，資產清空重新開始`)));return;}
     f.append(el("div",{class:(x.pass!=null?x.pass:x.pct!=null?x.pct>0:x.score>=50)?"up":"dn"},el("span",{class:"tm",text:hm}),
-      document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：相似度 ${x.score}${x.pass!=null?(x.pass?" ✓":" ✗"):""}${x.pct!=null?"，"+(x.pct>0?"+":"")+x.pct+"%":""}${x.up!=null?"，上漲機率 "+x.up+"%":""}`)));});
+      document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：相似度 ${x.score}${x.pass!=null?(x.pass?" ✓":" ✗"):""}${x.pct!=null?"，"+(x.pct>0?"+":"")+x.pct+"%":""}`)));});
 }
 function wireSettings(){
   const dlg=$("settings"),k=$("gkey"),upd=()=>{$("keystate").textContent=S.getItem("gk")?"✓ 已設定（只存在這個分頁）":"尚未設定";};
@@ -347,13 +439,13 @@ function wireSettings(){
 // ---------- 啟動 ----------
 async function main(){
   applyScale();wireSettings();wireNav();
-  setView({"#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
+  setView({"#news":"news","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
   if([CFG.firebase.apiKey,CFG.ia.clientId,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase、Client ID 與 Worker 網址");return;}
   const app=initializeApp(CFG.firebase);db=getFirestore(app);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
   onAuthStateChanged(auth,u=>{
     user=u;isDev=false;craftSig="";offP&&offP();offP=null;
-    if(u)u.getIdToken().then(t=>fetch(CFG.api+"/whoami",{method:"POST",headers:{Authorization:"Bearer "+t}})).then(r=>r.json()).then(j=>{isDev=!!j.dev;craftSig="";render();}).catch(()=>{});
+    if(u)u.getIdToken().then(t=>fetch(CFG.api+"/whoami",{method:"POST",headers:{Authorization:"Bearer "+t}})).then(r=>r.json()).then(j=>{isDev=!!j.dev;craftSig="";render();if(isDev)fetchOdds();}).catch(()=>{});
     if(u)offP=onSnapshot(doc(db,"players",u.uid),snap=>{me=snap.exists()?{...snap.data()}:{cash:CFG.startCash,hold:{},name:u.displayName||"玩家"};render();checkMob();});
     else me={cash:CFG.startCash,hold:{},name:"訪客"};
     render();
@@ -362,6 +454,7 @@ async function main(){
   onSnapshot(doc(db,"market","state"),snap=>{
     if(!snap.exists()){fetch(CFG.api+"/ensure-market",{method:"POST"}).catch(()=>{});return;}
     stocks=snap.data().stocks||{};render();});
+  onSnapshot(query(collection(db,"news"),orderBy("at","desc"),limit(30)),snap=>{newsList=[];snap.forEach(d=>newsList.push({id:d.id,...d.data()}));newsErr=false;render();},()=>{newsErr=true;render();});
   onSnapshot(query(collection(db,"feed"),orderBy("at","desc"),limit(15)),snap=>{const rows=[];snap.forEach(d=>rows.push(d.data()));renderFeed(rows);});
   if(token)loadIA().then(render).catch(e=>say(e.message));
 }

@@ -88,3 +88,12 @@ dialog.win.drawer{margin:0;inset:0 auto 0 0;height:100%;max-height:100%;width:mi
 .px-btn.sm{white-space:nowrap;flex:none;min-height:34px;padding:2px 10px;font-size:13px;box-shadow:2px 2px 0 var(--sh)}
 .hot{color:var(--up)!important}.log .mob{color:var(--mag)}
 .warn{border-left:3px solid var(--up);padding-left:8px;font-size:13px;color:var(--mu);margin:8px 0}
+
+/* 財經新聞 */
+.news .meta{color:var(--mu);font-size:12px}.news .nbody{white-space:pre-wrap;word-break:break-word;margin:8px 0}
+.news .cash{border:2px dashed var(--amber);padding:8px 10px;margin:8px 0;display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}
+.news .fxinfo{border-left:3px solid var(--mag);padding-left:8px;font-size:13px;color:var(--mu);margin:8px 0}
+.news.ended{opacity:.7}
+textarea.px-in{resize:vertical;min-height:96px;font-family:inherit}
+.fx{display:grid;grid-template-columns:1fr auto 76px;gap:8px;align-items:center;margin:6px 0}.fx select,.fx input{min-height:40px}
+.fx .px-sel{width:auto}.unit{display:flex;gap:8px}.unit .px-in{flex:1}.unit .px-sel{width:auto}

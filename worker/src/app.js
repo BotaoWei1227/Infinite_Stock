@@ -17,24 +17,38 @@ async function ensureBind(d,uid,iaId){
   if(b&&b.data.uid!==uid)throw new HttpError(409,"failed-precondition","此工坊已綁定另一個 Google 帳號");
   await d.db.commit([{path:`links/${uid}`,data:{iaId},ts:["at"],pre:null},{path:`iaLinks/${iaId}`,data:{uid},ts:["at"],pre:b?b.version:null}]);
 }
-const seed=now=>Object.fromEntries(SEED.map(([id,name,emoji,base])=>[id,{name,emoji,base,price:base,bias:0,biasAt:now,last:"",t:[now],p:[base]}]));
+const PRIV="secret/odds";   // 私密文件：玩家的機率偏移 + 財經活動影響。Firestore 規則不開放任何客戶端讀取，只有 Worker（服務帳戶）讀得到
+const seed=now=>Object.fromEntries(SEED.map(([id,name,emoji,base])=>[id,{name,emoji,base,price:base,last:"",t:[now],p:[base]}]));
 async function ensureMarket(d){
   if(!(await d.db.get(MP))){
-    try{await d.db.commit([{path:MP,data:{stocks:seed(d.now())},ts:["updatedAt"],pre:null}]);}
+    try{await d.db.commit([{path:MP,data:{stocks:seed(d.now())},ts:["updatedAt"],pre:null},{path:PRIV,data:{bias:{},events:[]},pre:null}]);}
     catch(e){if(!(e instanceof HttpError&&e.code==="conflict"))throw e;}
   }
   return {ok:true};
 }
-// 排程：每 2 分鐘讓每檔股票隨機走一步（整個行情在單一文件，一次寫入）
+// 讀私密機率文件；舊版把偏移/活動放在公開行情裡 → 第一次使用時搬進私密文件，並把公開文件裡的機率欄位清掉
+async function loadOdds(d){
+  const o=await d.db.get(PRIV);if(o)return o;
+  const m=await d.db.get(MP);if(!m)throw new HttpError(404,"not-found","行情尚未建立");
+  const bias={},stocks={};
+  for(const [id,{bias:b,biasAt:at,...pub}] of Object.entries(m.data.stocks)){stocks[id]=pub;if(b)bias[id]={v:b,at:at??d.now()};}
+  try{await d.db.commit([{path:PRIV,data:{bias,events:m.data.events||[]},pre:null},{path:MP,data:{stocks,events:undefined},pre:m.version}]);}
+  catch(e){if(!(e instanceof HttpError&&e.code==="conflict"))throw e;}
+  return d.db.get(PRIV);
+}
+// 排程：每 2 分鐘讓每檔股票隨機走一步（機率只讀私密文件，公開行情只寫價格與走勢）
 export async function tick(d){
   if(!(await d.db.get(MP)))return ensureMarket(d);
   return retry(async()=>{
-    const m=await d.db.get(MP),now=d.now(),stocks={};
-    for(const [id,s] of Object.entries(m.data.stocks))stocks[id]=L.step(s,d.rand(),d.rand(),now);
-    await d.db.commit([{path:MP,data:{stocks},ts:["updatedAt"],pre:m.version}]);
+    const [m,o]=await Promise.all([d.db.get(MP),loadOdds(d)]),now=d.now(),stocks={},ev=L.activeEvents(o.data.events,now);
+    for(const [id,s] of Object.entries(m.data.stocks))stocks[id]=L.step(s,d.rand(),d.rand(),now,L.effOdds(o.data.bias?.[id],now),L.eventShift(ev,id,now));
+    const ops=[{path:MP,data:{stocks},ts:["updatedAt"],pre:m.version}];
+    if(ev.length!==(o.data.events||[]).length)ops.push({path:PRIV,data:{events:ev},pre:o.version});   // 順便清掉過期活動
+    await d.db.commit(ops);
     return {ok:true};
   });
 }
+
 const STRIKE_MSG="欠款太多又拖過一天，黑道找上門了！資產被清空，只能重新開始。";
 // 黑道：欠款連續超過上限滿 24 小時 → 清空資產（保留已投入紀錄），並在全服動態留下一筆
 async function strikeIfDue(d,pid,p){
@@ -68,20 +82,22 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
   if(!dev&&!L.recent(await d.ia.history(iaToken),d.now()).has(itemName))throw new HttpError(403,"permission-denied","只能投入 24 小時內做出的造物");
   const j=await d.judge(s0.name,itemName,geminiKey);
   return retry(async()=>{
-    const [p,m]=await Promise.all([d.db.get(pid),d.db.get(MP)]);
+    const [p,m,o]=await Promise.all([d.db.get(pid),d.db.get(MP),loadOdds(d)]);
     await strikeIfDue(d,pid,p);
     const stocks=m?.data.stocks,s=stocks?.[stockId];
     if(!s)throw new HttpError(404,"not-found","找不到這檔股票");
     if(cool(p))throw new HttpError(429,"resource-exhausted","投入太頻繁，請稍候幾秒");
     if(!dev&&L.usedBefore(p?.data.used,itemName))throw new HttpError(409,"failed-precondition","這個造物你已經投入過了（同一個造物只能投入一次，不能重複）");
-    const now=d.now(),bias=L.nudge(L.effBias(s,now),j.score),up=Math.round(L.upProb(bias)*100);
-    const next={...s,bias,biasAt:now,last:`${itemName}（${j.score}分）`};   // 只改變上漲機率；價格由排程隨機走，投入當下不會跳動
+    const now=d.now(),bias=L.nudge(L.effOdds(o.data.bias?.[stockId],now),j.score);   // 只改變上漲機率；價格由排程隨機走，投入當下不會跳動
+    const up=Math.round(L.upProb(bias+L.eventShift(o.data.events,stockId,now))*100);
     const who=dev?(a.name||"開發者"):(me.workshopName||a.name||"無名工坊");
     await d.db.commit([
-      {path:MP,data:{stocks:{...stocks,[stockId]:next}},ts:["updatedAt"],pre:m.version},
+      {path:MP,data:{stocks:{...stocks,[stockId]:{...s,last:`${itemName}（${j.score}分）`}}},ts:["updatedAt"],pre:m.version},
+      {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:bias,at:now}}},pre:o.version},
       {path:pid,data:{...(p?{}:{cash:START,hold:{}}),name:who,lastInjectAt:d.now(),...(dev?{}:{used:L.markUsed(p?.data.used,itemName,d.now())})},pre:p?p.version:null},
-      {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:itemName,score:j.score,rel:j.relation,pass:L.passes(j.score),reason:j.reason,up,...(dev?{dev:true}:{})},ts:["at"],pre:null}]);
-    return {...j,price:s.price,up,pass:L.passes(j.score),threshold:L.SIM_THRESHOLD};
+      {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:itemName,score:j.score,rel:j.relation,pass:L.passes(j.score),reason:j.reason,...(dev?{dev:true}:{})},ts:["at"],pre:null}]);
+    // 機率只有開發者看得到：一般玩家的回應不含 up
+    return {...j,price:s.price,pass:L.passes(j.score),threshold:L.SIM_THRESHOLD,...(dev?{up}:{})};
   });
 }
 // 買賣：只需要 Google 登入，不需要連結 IA
@@ -89,15 +105,15 @@ async function trade(d,a,{stockId,dir}={}){
   if(!/^[a-z]{2,20}$/.test(stockId||"")||(dir!==1&&dir!==-1))throw bad("參數錯誤");
   const pid=`players/${a.uid}`;
   return retry(async()=>{
-    const [p,m]=await Promise.all([d.db.get(pid),d.db.get(MP)]);
+    const [p,m,o]=await Promise.all([d.db.get(pid),d.db.get(MP),loadOdds(d)]);
     await strikeIfDue(d,pid,p);
     const s=m?.data.stocks?.[stockId];
     if(!s)throw new HttpError(404,"not-found","找不到這檔股票");
     let r;try{r=L.trade(p?p.data:{cash:START,hold:{}},stockId,s.price,dir);}
     catch(e){throw new HttpError(409,"failed-precondition",e.message);}
-    const stocks={...m.data.stocks,[stockId]:{...s,bias:L.tradeNudge(L.effBias(s,d.now()),dir),biasAt:d.now()}};   // 買進推升、賣出壓低上漲機率（買賣壓力）；不直接改價格，避免買賣套利
+    const now=d.now();   // 買進推升、賣出壓低上漲機率（買賣壓力）；不直接改價格，避免買賣套利
     await d.db.commit([
-      {path:MP,data:{stocks},ts:["updatedAt"],pre:m.version},
+      {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:L.tradeNudge(L.effOdds(o.data.bias?.[stockId],now),dir),at:now}}},pre:o.version},
       {path:pid,data:{...(p?{}:{name:a.name||"玩家"}),cash:r.cash,hold:r.hold},pre:p?p.version:null}]);
     return {ok:true};
   });
@@ -126,18 +142,85 @@ async function bank(d,a,{action,amount,all,at}={}){
     return {ok:true,cash:upd.cash,owed:r2(L.owed(after.loan,now)),deposits:r2(L.depositsValue(after,now))};
   });
 }
+// ---- 財經新聞：開發者發布活動（名稱、資料、持續時間、各股票上漲基準機率 ±x、普發現金）；玩家在活動期間領一次現金
+const NEWS_ID=/^[0-9a-f-]{36}$/,noCtl=t=>!/[\u0000-\u0008\u000b-\u001f]/.test(t);    // 活動資料允許換行
+async function newsPublish(d,a,{title,body:text,durationMin,effects,cash}){
+  title=typeof title==="string"?title.trim():"";text=typeof text==="string"?text.trim():"";
+  if(!title||title.length>40||!noCtl(title)||/\n/.test(title))throw bad("活動名稱要 1–40 字（不能換行）");
+  if(text.length>600||!noCtl(text))throw bad("活動資料最多 600 字");
+  const mins=Number(durationMin);if(!(mins>=1&&mins<=43200))throw bad("活動持續時間要在 1 分鐘～30 天之間");
+  const money=Math.round(Number(cash||0)*100)/100;if(!(money>=0&&money<=1e6))throw bad("普發現金要在 0～1,000,000 之間");
+  if(effects!=null&&(typeof effects!=="object"||Array.isArray(effects)))throw bad("活動影響格式不正確");
+  const eff={},src=effects||{};
+  if(Object.keys(src).length>12)throw bad("活動影響的股票太多");
+  for(const [id,x] of Object.entries(src)){
+    if(!/^[a-z]{2,20}$/.test(id)||!Number.isInteger(x)||x===0||Math.abs(x)>L.MAX_SHIFT)throw bad(`活動影響要是 ±1～±${L.MAX_SHIFT} 的整數`);
+    eff[id]=x;
+  }
+  const id=crypto.randomUUID();
+  return retry(async()=>{
+    const [m,o]=await Promise.all([d.db.get(MP),loadOdds(d)]);
+    for(const sid of Object.keys(eff))if(!m.data.stocks[sid])throw bad(`找不到股票 ${sid}`);
+    const now=d.now(),until=now+Math.round(mins*60000),ev=L.activeEvents(o.data.events,now);
+    if(Object.keys(eff).length){   // 純資訊活動（沒有影響）不佔用名額
+      if(ev.length>=L.MAX_EVENTS)throw bad("同時進行的活動太多了，請先結束幾個");
+      ev.push({id,until,shift:Object.fromEntries(Object.entries(eff).map(([k,x])=>[k,x/100]))});
+    }
+    // 公開的新聞文件「不含」活動影響（機率只有開發者看得到）；影響只存在私密文件
+    await d.db.commit([
+      {path:PRIV,data:{events:ev},pre:o.version},
+      {path:`news/${id}`,data:{title,body:text,by:a.name||"開發者",endsAt:until,durationMin:mins,cash:money},ts:["at"],pre:null}]);
+    return {ok:true,id,endsAt:until};
+  });
+}
+async function newsEnd(d,{id}){
+  if(!NEWS_ID.test(id||""))throw bad("參數錯誤");
+  return retry(async()=>{
+    const [n,o]=await Promise.all([d.db.get(`news/${id}`),loadOdds(d)]);
+    if(!n)throw new HttpError(404,"not-found","找不到這個活動");
+    const now=d.now();
+    await d.db.commit([
+      {path:`news/${id}`,data:{endsAt:Math.min(n.data.endsAt,now)},pre:n.version},
+      {path:PRIV,data:{events:L.activeEvents(o.data.events,now).filter(e=>e.id!==id)},pre:o.version}]);
+    return {ok:true};
+  });
+}
+async function newsClaim(d,a,{id}){
+  if(!NEWS_ID.test(id||""))throw bad("參數錯誤");
+  const pid=`players/${a.uid}`;
+  return retry(async()=>{
+    const [p,n]=await Promise.all([d.db.get(pid),d.db.get(`news/${id}`)]),now=d.now();
+    await strikeIfDue(d,pid,p);
+    if(!n||n.data.endsAt<=now||!(n.data.cash>0))throw new HttpError(409,"failed-precondition","這個活動已經結束，或沒有現金可以領");
+    if(p?.data.claims&&Object.hasOwn(p.data.claims,id))throw new HttpError(409,"failed-precondition","你已經領過這次的普發現金了");
+    const data=p?p.data:{cash:START},amount=n.data.cash;
+    await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash:Math.round((data.cash+amount)*100)/100,claims:L.markClaim(data.claims,id,now)},pre:p?p.version:null}]);
+    return {ok:true,amount};
+  });
+}
+async function news(d,a,body={}){
+  if(body.action==="claim")return newsClaim(d,a,body);
+  if(body.action!=="publish"&&body.action!=="end")throw bad("參數錯誤");
+  if(!isDev(d,a))throw new HttpError(403,"permission-denied","只有開發者可以發布或結束活動");
+  return body.action==="publish"?newsPublish(d,a,body):newsEnd(d,body);
+}
 export async function route(req,env,d){
   if(req.method==="OPTIONS")return new Response(null,{status:204,headers:cors(env)});
   const path=new URL(req.url).pathname;
   try{
     if(req.method!=="POST")throw new HttpError(405,"invalid-argument","方法不允許");
     if(path==="/ensure-market")return out(env,200,await ensureMarket(d));
-    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/whoami"){
+    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"){
       const a=await d.verify(req);
       if(a.provider!=="google.com")throw new HttpError(401,"unauthenticated","請先以 Google 帳號登入");
       if(path==="/whoami")return out(env,200,{dev:isDev(d,a)});
+      if(path==="/odds"){   // 只有開發者看得到各股票的上漲機率（偏移與活動影響）；一般玩家一律 403
+        if(!isDev(d,a))throw new HttpError(403,"permission-denied","只有開發者可以查看");
+        const o=await loadOdds(d),now=d.now();
+        return out(env,200,{now,bias:o.data.bias||{},events:L.activeEvents(o.data.events,now)});
+      }
       let body;try{body=await req.json();}catch{throw bad("請求格式錯誤");}
-      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:trade)(d,a,body));
+      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:trade)(d,a,body));
     }
     throw new HttpError(404,"not-found","找不到");
   }catch(e){
