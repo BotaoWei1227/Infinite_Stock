@@ -13,8 +13,8 @@ export const effBias=(s,now)=>{const b=s.bias||0;if(!b)return 0;const e=b*Math.p
 // 相似度（0–100）必須「高過」門檻才算相關：相似度越高於門檻，提高上漲機率越多（100 時為滿額）；
 // 沒高過就視為無關：越低於門檻，提高下跌機率越多（0 時為滿額）。剛好等於門檻 → 沒有影響
 export const SIM_THRESHOLD=70;
-export const passes=sim=>sim>SIM_THRESHOLD;
-export const nudge=(bias,sim)=>clamp((bias||0)+(passes(sim)?(sim-SIM_THRESHOLD)/(100-SIM_THRESHOLD):-(SIM_THRESHOLD-sim)/SIM_THRESHOLD)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
+export const passes=(sim,threshold=SIM_THRESHOLD)=>sim>threshold;
+export const nudge=(bias,sim,threshold=SIM_THRESHOLD)=>clamp((bias||0)+(passes(sim,threshold)?(sim-threshold)/(100-threshold):-(threshold-sim)/threshold)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
 export const tradeNudge=(bias,dir,shares=1)=>clamp((bias||0)+dir*TRADE_NUDGE*shares,-BIAS_CAP,BIAS_CAP);
 // 私密機率紀錄 rec＝{v:偏移, at:時間}（存在只有伺服器讀得到的文件）；回傳「現在」衰減後的偏移
 export const effOdds=(rec,now)=>rec?effBias({bias:rec.v,biasAt:rec.at},now):0;
@@ -57,28 +57,28 @@ export function markUsed(u,name,now){
 // ---- 黑道：欠款超過 MOB_LIMIT 並「連續」超過 24 小時 → 黑道上門，資產清空重新開始
 export const RATE=.05,MOB_LIMIT=100,MAX_DEBT=1e9;
 const cents=n=>Math.round(n*100)/100;
-export const owed=(loan,now)=>loan&&loan.p>0?loan.p*Math.pow(1+RATE,Math.max(0,now-loan.t)/DAY):0;
+export const owed=(loan,now,rate=RATE)=>loan&&loan.p>0?loan.p*Math.pow(1+rate,Math.max(0,now-loan.t)/DAY):0;
 // 欠款「開始連續超過上限」的時間點；沒超過則 null（利息把欠款推過上限的時間點用公式反推）
-export function overAt(loan,now){
+export function overAt(loan,now,rate=RATE){
   if(!loan||!(loan.p>0))return null;
-  if(owed(loan,now)<=MOB_LIMIT)return null;
+  if(owed(loan,now,rate)<=MOB_LIMIT)return null;
   if(loan.over!=null)return loan.over;
   if(loan.p>=MOB_LIMIT)return loan.t;
-  return loan.t+DAY*Math.log(MOB_LIMIT/loan.p)/Math.log(1+RATE);
+  return loan.t+DAY*Math.log(MOB_LIMIT/loan.p)/Math.log(1+rate);
 }
-export const mobDue=(loan,now)=>{const o=overAt(loan,now);return o!=null&&now-o>=DAY;};
-const nextLoan=(prev,p,now)=>p>MOB_LIMIT?{p,t:now,over:overAt(prev,now)??now}:{p,t:now};
-export function borrow(d,amount,now){
-  const o=owed(d.loan,now);
+export const mobDue=(loan,now,rate=RATE)=>{const o=overAt(loan,now,rate);return o!=null&&now-o>=DAY;};
+const nextLoan=(prev,p,now,rate=RATE)=>p>MOB_LIMIT?{p,t:now,over:overAt(prev,now,rate)??now}:{p,t:now};
+export function borrow(d,amount,now,rate=RATE){
+  const o=owed(d.loan,now,rate);
   if(o+amount>MAX_DEBT)throw new Error("借款總額過大");
-  return {cash:cents(d.cash+amount),loan:nextLoan(d.loan,cents(o+amount),now)};
+  return {cash:cents(d.cash+amount),loan:nextLoan(d.loan,cents(o+amount),now,rate)};
 }
-export function repay(d,amount,now,all){
-  const o=owed(d.loan,now);
+export function repay(d,amount,now,all,rate=RATE){
+  const o=owed(d.loan,now,rate);
   if(o<.005)throw new Error("目前沒有欠款");
   const full=all||amount>=o,pay=full?Math.ceil(o*100-1e-9)/100:amount;
   if(d.cash+1e-9<pay)throw new Error("現金不足");
-  return {cash:cents(d.cash-pay),loan:full?{p:0,t:now}:nextLoan(d.loan,cents(o-pay),now)};
+  return {cash:cents(d.cash-pay),loan:full?{p:0,t:now}:nextLoan(d.loan,cents(o-pay),now,rate)};
 }
 
 // ---- 存款：活存日利率 0.4%（隨時存取）；定存日利率 1.2%，鎖 3 天，到期自動轉入活存（之後以活存利率計息）
@@ -87,41 +87,41 @@ export const DEM_RATE=.004,TD_RATE=.012,TD_DAYS=3,MAX_TDS=20;
 const grow=(r,ms)=>Math.pow(1+r,Math.max(0,ms)/DAY);
 const r4=n=>Math.round(n*1e4)/1e4;
 export const tdEnd=td=>td.t+TD_DAYS*DAY;
-export const demValue=(dem,now)=>dem&&dem.a>0?dem.a*grow(DEM_RATE,now-dem.t):0;
-export const tdValue=(td,now)=>td.p*grow(TD_RATE,Math.min(now,tdEnd(td))-td.t);
+export const demValue=(dem,now,rate=DEM_RATE)=>dem&&dem.a>0?dem.a*grow(rate,now-dem.t):0;
+export const tdValue=(td,now,rate=TD_RATE)=>td.p*grow(rate,Math.min(now,tdEnd(td))-td.t);
 // 把已到期的定存，依到期先後轉入活存，並把活存結算到 now；回傳 {dem:{a,t:now}, tds:尚未到期的定存}
-export function settle(d,now){
+export function settle(d,now,demRate=DEM_RATE,tdRate=TD_RATE){
   let dem=d.dem&&d.dem.a>0?{a:d.dem.a,t:d.dem.t}:{a:0,t:now};
   const live=[],done=[];
   for(const td of d.tds||[])(tdEnd(td)<=now?done:live).push(td);
   done.sort((x,y)=>tdEnd(x)-tdEnd(y));
-  for(const td of done){const T=tdEnd(td);dem={a:demValue(dem,T)+tdValue(td,T),t:T};}
-  return {dem:{a:r4(demValue(dem,now)),t:now},tds:live};
+  for(const td of done){const T=tdEnd(td);dem={a:demValue(dem,T,demRate)+tdValue(td,T,tdRate),t:T};}
+  return {dem:{a:r4(demValue(dem,now,demRate)),t:now},tds:live};
 }
-export const depositsValue=(d,now)=>{const s=settle(d,now);return s.dem.a+s.tds.reduce((a,t)=>a+tdValue(t,now),0);};
-export function demIn(d,amt,now){
-  const s=settle(d,now);
+export const depositsValue=(d,now,demRate=DEM_RATE,tdRate=TD_RATE)=>{const s=settle(d,now,demRate,tdRate);return s.dem.a+s.tds.reduce((a,t)=>a+tdValue(t,now,tdRate),0);};
+export function demIn(d,amt,now,demRate=DEM_RATE,tdRate=TD_RATE){
+  const s=settle(d,now,demRate,tdRate);
   if(d.cash+1e-9<amt)throw new Error("現金不足");
   return {cash:cents(d.cash-amt),dem:{a:r4(s.dem.a+amt),t:now},tds:s.tds};
 }
-export function demOut(d,amt,now,all){
-  const s=settle(d,now),v=s.dem.a;
+export function demOut(d,amt,now,all,demRate=DEM_RATE,tdRate=TD_RATE){
+  const s=settle(d,now,demRate,tdRate),v=s.dem.a;
   if(v<.005)throw new Error("活存沒有餘額");
   if(!all&&amt>v+.005)throw new Error("活存餘額不足");     // 要領的比餘額多 → 報錯，不會默默當成全領
   const everything=all||amt>=v-.005;                      // 差不到半分錢視為全領
   const take=everything?cents(v):amt;
   return {cash:cents(d.cash+take),dem:{a:everything?0:r4(v-take),t:now},tds:s.tds};
 }
-export function tdIn(d,amt,now){
-  const s=settle(d,now);
+export function tdIn(d,amt,now,demRate=DEM_RATE,tdRate=TD_RATE){
+  const s=settle(d,now,demRate,tdRate);
   if(amt<1)throw new Error("定存最少 1");
   if(s.tds.length>=MAX_TDS)throw new Error(`定存最多 ${MAX_TDS} 筆`);
   if(d.cash+1e-9<amt)throw new Error("現金不足");
   return {cash:cents(d.cash-amt),dem:s.dem,tds:[...s.tds,{p:r4(amt),t:now}]};
 }
 // 以「存入時間」辨識是哪一筆（比序號穩，不會因為別筆剛好到期而錯位）
-export function tdBreak(d,at,now){
-  const s=settle(d,now),td=s.tds.find(x=>x.t===at);
+export function tdBreak(d,at,now,demRate=DEM_RATE,tdRate=TD_RATE){
+  const s=settle(d,now,demRate,tdRate),td=s.tds.find(x=>x.t===at);
   if(!td)throw new Error("找不到這筆定存（可能已到期，轉入活存了）");
   return {cash:cents(d.cash+td.p),dem:s.dem,tds:s.tds.filter(x=>x!==td)};
 }

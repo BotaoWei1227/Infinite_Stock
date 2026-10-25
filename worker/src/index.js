@@ -2,7 +2,7 @@ import {route,tick,generateDailyTask,publishScheduledNews} from "./app.js";
 import {makeDb} from "./firestore.js";
 import {verifyFirebaseToken} from "./auth.js";
 import {iaClient,judge,dailyTask as generateTask} from "./ia.js";
-const API=new Set(["/inject","/trade","/bank","/news","/odds","/whoami","/ensure-market","/profile","/leaderboard","/blackmarket","/analyst"]);
+const API=new Set(["/inject","/trade","/bank","/news","/odds","/whoami","/ensure-market","/profile","/leaderboard","/blackmarket","/analyst","/admin-settings"]);
 const deps=env=>({
   db:makeDb(env),
   verify:r=>verifyFirebaseToken(r,env),

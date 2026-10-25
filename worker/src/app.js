@@ -18,6 +18,8 @@ async function ensureBind(d,uid,iaId){
   await d.db.commit([{path:`links/${uid}`,data:{iaId},ts:["at"],pre:null},{path:`iaLinks/${iaId}`,data:{uid},ts:["at"],pre:b?b.version:null}]);
 }
 const PRIV="secret/odds";   // 私密文件：玩家的機率偏移 + 財經活動影響。Firestore 規則不開放任何客戶端讀取，只有 Worker（服務帳戶）讀得到
+const DEFAULT_SETTINGS={loanRate:L.RATE,demRate:L.DEM_RATE,tdRate:L.TD_RATE,threshold:L.SIM_THRESHOLD};
+const settingsOf=o=>({...DEFAULT_SETTINGS,...(o?.data?.settings||{})});
 const NEWS_QUEUE="secret/newsSchedule",TAIPEI="Asia/Taipei";
 const seed=now=>Object.fromEntries(SEED.map(([id,name,emoji,base])=>[id,{name,emoji,base,price:base,last:"",t:[now],p:[base]}]));
 const taipeiParts=now=>Object.fromEntries(new Intl.DateTimeFormat("en-CA",{timeZone:TAIPEI,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(new Date(now)).filter(x=>x.type!=="literal").map(x=>[x.type,x.value]));
@@ -85,8 +87,9 @@ function assertFree(p,now){if((p?.data.jailUntil||0)>now)throw new HttpError(403
 // 黑道：欠款連續超過上限滿 24 小時 → 資產重製，並關押 24 小時
 async function strikeIfDue(d,pid,p){
   const now=d.now();
-  if(!p||!L.mobDue(p.data.loan,now))return;
-  const owed=Math.round(L.owed(p.data.loan,now)*100)/100;
+  const cfg=settingsOf(await loadOdds(d));
+  if(!p||!L.mobDue(p.data.loan,now,cfg.loanRate))return;
+  const owed=Math.round(L.owed(p.data.loan,now,cfg.loanRate)*100)/100;
   await d.db.commit([
     {path:pid,data:{cash:START,hold:{},loan:{p:0,t:now},dem:{a:0,t:now},tds:[],bankrupt:(p.data.bankrupt||0)+1,jailUntil:now+SENTENCE},pre:p.version},
     {path:`feed/${crypto.randomUUID()}`,data:{who:p.data.customName||p.data.name||"玩家",mob:true,owed},ts:["at"],pre:null}]);
@@ -122,16 +125,16 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
     if(!s)throw new HttpError(404,"not-found","找不到這檔股票");
     if(cool(p))throw new HttpError(429,"resource-exhausted","投入太頻繁，請稍候幾秒");
     if(!dev&&L.usedBefore(p?.data.used,itemName))throw new HttpError(409,"failed-precondition","這個造物你已經投入過了（同一個造物只能投入一次，不能重複）");
-    const now=d.now(),bias=L.nudge(L.effOdds(o.data.bias?.[stockId],now),j.score);   // 只改變上漲機率；價格由排程隨機走，投入當下不會跳動
+    const cfg=settingsOf(o),now=d.now(),bias=L.nudge(L.effOdds(o.data.bias?.[stockId],now),j.score,cfg.threshold);   // 只改變上漲機率；價格由排程隨機走，投入當下不會跳動
     const up=Math.round(L.upProb(bias+L.eventShift(o.data.events,stockId,now))*100);
     const who=p?.data.customName|| (dev?(a.name||"開發者"):(me.workshopName||a.name||"無名工坊"));
     await d.db.commit([
       {path:MP,data:{stocks:{...stocks,[stockId]:{...s,last:`${itemName}（${j.score}分）`}}},ts:["updatedAt"],pre:m.version},
       {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:bias,at:now}}},pre:o.version},
       {path:pid,data:{...(p?{}:{cash:START,hold:{}}),name:who,lastInjectAt:d.now(),...(dev?{}:{used:L.markUsed(p?.data.used,itemName,d.now())})},pre:p?p.version:null},
-      {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:itemName,score:j.score,rel:j.relation,pass:L.passes(j.score),reason:j.reason,...(dev?{dev:true}:{})},ts:["at"],pre:null}]);
+      {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:itemName,score:j.score,rel:j.relation,pass:L.passes(j.score,cfg.threshold),reason:j.reason,...(dev?{dev:true}:{})},ts:["at"],pre:null}]);
     // 機率只有開發者看得到：一般玩家的回應不含 up
-    return {...j,price:s.price,pass:L.passes(j.score),threshold:L.SIM_THRESHOLD,...(dev?{up}:{})};
+    return {...j,price:s.price,pass:L.passes(j.score,cfg.threshold),threshold:cfg.threshold,...(dev?{up}:{})};
   });
 }
 // 買賣：只需要 Google 登入，不需要連結 IA
@@ -149,7 +152,7 @@ async function trade(d,a,{stockId,dir,shares=1}={}){
     await d.db.commit([
       {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:L.tradeNudge(L.effOdds(o.data.bias?.[stockId],now),dir,shares),at:now}}},pre:o.version},
       {path:pid,data:{...(p?{}:{name:a.name||"玩家"}),cash:r.cash,hold:r.hold},pre:p?p.version:null}]);
-    return {ok:true};
+    return {ok:true,cash:r.cash,hold:r.hold};
   });
 }
 // 銀行：借款 / 還款 / 全額還清 / 活存存提 / 定存存入與提前解約 / check（只檢查黑道）。都不需要 IA
@@ -164,16 +167,16 @@ async function bank(d,a,{action,amount,all,at}={}){
     const p=await d.db.get(pid),now=d.now();
     await strikeIfDue(d,pid,p);
     if(action==="check")return {ok:true};
-    const data=p?p.data:{cash:START};
+    const data=p?p.data:{cash:START},cfg=settingsOf(await loadOdds(d));
     let upd;
     try{
-      upd=action==="borrow"?L.borrow(data,amt,now):action==="repay"?L.repay(data,amt,now,everything)
-        :action==="dem_in"?L.demIn(data,amt,now):action==="dem_out"?L.demOut(data,amt,now,everything)
-        :action==="td_in"?L.tdIn(data,amt,now):L.tdBreak(data,Number(at),now);
+      upd=action==="borrow"?L.borrow(data,amt,now,cfg.loanRate):action==="repay"?L.repay(data,amt,now,everything,cfg.loanRate)
+        :action==="dem_in"?L.demIn(data,amt,now,cfg.demRate,cfg.tdRate):action==="dem_out"?L.demOut(data,amt,now,everything,cfg.demRate,cfg.tdRate)
+        :action==="td_in"?L.tdIn(data,amt,now,cfg.demRate,cfg.tdRate):L.tdBreak(data,Number(at),now,cfg.demRate,cfg.tdRate);
     }catch(e){throw new HttpError(409,"failed-precondition",e.message);}
     await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),...upd},pre:p?p.version:null}]);
     const after={...data,...upd},r2=n=>Math.round(n*100)/100;
-    return {ok:true,cash:upd.cash,owed:r2(L.owed(after.loan,now)),deposits:r2(L.depositsValue(after,now))};
+    return {ok:true,cash:upd.cash,owed:r2(L.owed(after.loan,now,cfg.loanRate)),deposits:r2(L.depositsValue(after,now,cfg.demRate,cfg.tdRate))};
   });
 }
 // ---- 財經新聞：開發者發布活動（名稱、資料、持續時間、各股票上漲基準機率 ±x、普發現金）；玩家在活動期間領一次現金
@@ -291,8 +294,21 @@ async function setPlayerName(d,a,{name}={}){
   return retry(async()=>{const p=await d.db.get(path);await d.db.commit([{path,data:{...(p?{}:{cash:START,hold:{},name:a.name||"玩家"}),customName:name},pre:p?p.version:null}]);return {ok:true,name};});
 }
 async function leaderboard(d,a){
-  const [players,m]=await Promise.all([d.db.list("players"),d.db.get(MP)]),stocks=m?.data.stocks||{},now=d.now();
-  return {rows:players.map(({id,data:p})=>({isMe:id===a.uid,name:p.customName||p.name||"玩家",value:Math.round((Number(p.cash||0)+Object.entries(p.hold||{}).reduce((n,[id,q])=>n+Number(q||0)*Number(stocks[id]?.price||0),0)-L.owed(p.loan,now)+L.depositsValue(p,now))*100)/100})).sort((a,b)=>b.value-a.value||a.name.localeCompare(b.name,"zh-Hant")).slice(0,100)};
+  const [players,m,o]=await Promise.all([d.db.list("players"),d.db.get(MP),loadOdds(d)]),stocks=m?.data.stocks||{},now=d.now(),cfg=settingsOf(o);
+  return {rows:players.map(({id,data:p})=>({isMe:id===a.uid,name:p.customName||p.name||"玩家",value:Math.round((Number(p.cash||0)+Object.entries(p.hold||{}).reduce((n,[id,q])=>n+Number(q||0)*Number(stocks[id]?.price||0),0)-L.owed(p.loan,now,cfg.loanRate)+L.depositsValue(p,now,cfg.demRate,cfg.tdRate))*100)/100})).sort((a,b)=>b.value-a.value||a.name.localeCompare(b.name,"zh-Hant")).slice(0,100)};
+}
+async function developerSettings(d,a,body={}){
+  if(!isDev(d,a))throw new HttpError(403,"permission-denied","只有開發者可以調整設定");
+  return retry(async()=>{
+    const o=await loadOdds(d),cfg=settingsOf(o);
+    if(body.action==="save"){
+      const values={loanRate:Number(body.loanRate),demRate:Number(body.demRate),tdRate:Number(body.tdRate),threshold:Number(body.threshold)};
+      if(!Number.isFinite(values.loanRate)||values.loanRate<0||values.loanRate>100||!Number.isFinite(values.demRate)||values.demRate<0||values.demRate>100||!Number.isFinite(values.tdRate)||values.tdRate<0||values.tdRate>100||!Number.isInteger(values.threshold)||values.threshold<1||values.threshold>99)throw bad("利率需為 0–100%，門檻需為 1–99% 整數");
+      const next={loanRate:values.loanRate/100,demRate:values.demRate/100,tdRate:values.tdRate/100,threshold:values.threshold};
+      await d.db.commit([{path:PRIV,data:{...o.data,settings:next},pre:o.version}]);return {ok:true,settings:next};
+    }
+    return {settings:cfg};
+  });
 }
 async function analyst(d,a,{stockId,amount}={}){
   const fee=Number(amount);
@@ -351,10 +367,11 @@ export async function route(req,env,d){
   try{
     if(req.method!=="POST")throw new HttpError(405,"invalid-argument","方法不允許");
     if(path==="/ensure-market")return out(env,200,await ensureMarket(d));
-    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"||path==="/profile"||path==="/leaderboard"||path==="/blackmarket"||path==="/analyst"){
+    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"||path==="/profile"||path==="/leaderboard"||path==="/blackmarket"||path==="/analyst"||path==="/admin-settings"){
       const a=await d.verify(req);
       if(a.provider!=="google.com")throw new HttpError(401,"unauthenticated","請先以 Google 帳號登入");
-      if(path==="/whoami")return out(env,200,{dev:isDev(d,a)});
+      if(path==="/whoami"){await ensureMarket(d);const o=await loadOdds(d);return out(env,200,{dev:isDev(d,a),settings:settingsOf(o)});}
+      if(path==="/admin-settings"){let b={};try{b=await req.json();}catch{}return out(env,200,await developerSettings(d,a,b));}
       if(path==="/leaderboard")return out(env,200,await leaderboard(d,a));
       if(path==="/blackmarket"&&req.method==="POST"){
         const preBody=await req.clone().json().catch(()=>({}));

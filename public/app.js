@@ -9,7 +9,7 @@ const fmt=n=>(Math.round(n*100)/100).toFixed(2);
 const prisonLeft=until=>hmLeft(until-Date.now());
 let hinting=true;
 const say=t=>{hinting=false;$("msg").textContent=t;};
-let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},dailyTasks={date:"",tasks:{}},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="",odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0,analystReport=null,analystStock="",tradeShares=1,marketOpenPrev=null;
+let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},dailyTasks={date:"",tasks:{}},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="",odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0,analystReport=null,analystStock="",tradeShares=1,marketOpenPrev=null,gameSettings={loanRate:.05,demRate:.004,tdRate:.012,threshold:70},settingsSyncedAt=0;
 
 // ---------- OAuth：Authorization Code + PKCE S256（瀏覽器端） ----------
 const b64u=b=>btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
@@ -95,7 +95,7 @@ async function inject(id){
   const r=await act("inject",{stockId:id,itemName,geminiKey:S.getItem("gk")});
   if(r){item=null;say(`相似度 ${r.score}${REL[r.relation]?"（"+REL[r.relation]+"）":""}：${r.reason}｜${r.pass?`超過門檻 ${r.threshold}，提高`:`沒超過門檻 ${r.threshold}，降低`}${stocks[id]?.name||""}的上漲機率${r.up!=null?`（現在 ${r.up}%・僅開發者可見）`:""}`);render();}
 }
-const trade=async(id,dir)=>{const shares=tradeShares,r=await act("trade",{stockId:id,dir,shares});if(r)say(`已${dir>0?"買入":"賣出"} ${shares} 股${stocks[id]?.name||""}`);};
+const trade=async(id,dir)=>{const shares=tradeShares,r=await act("trade",{stockId:id,dir,shares});if(r){me={...me,cash:r.cash,hold:r.hold};say(`已${dir>0?"買入":"賣出"} ${shares} 股${stocks[id]?.name||""}`);render();}};
 // 上漲機率只有開發者看得到：資料放在伺服器的私密文件，開發者才能用 /odds 取得（一般玩家的瀏覽器裡根本沒有這些資料）
 const DECAY_MS=3e5,DECAY=.9;   // 機率提升每 5 分鐘只剩 90%（須與伺服器 worker/src/logic.js 一致）
 const nowS=()=>Date.now()+skew;
@@ -115,13 +115,13 @@ async function fetchOdds(){
     const j=await r.json();odds=j;skew=j.now-Date.now();render();
   }catch{}
 }
-const DAYMS=864e5,RATE=.05,MOB_LIMIT=100;
+const DAYMS=864e5,MOB_LIMIT=100;
 // 存款（須與伺服器 worker/src/logic.js 一致）：活存日利率 0.4%；定存日利率 1.2%、鎖 3 天，到期自動轉入活存
-const DEM_RATE=.004,TD_RATE=.012,TD_DAYS=3;
+const TD_DAYS=3;
 const grow=(r,ms)=>Math.pow(1+r,Math.max(0,ms)/DAYMS);
-const demValueC=(dem,now)=>dem&&dem.a>0?dem.a*grow(DEM_RATE,now-dem.t):0;
+const demValueC=(dem,now)=>dem&&dem.a>0?dem.a*grow(gameSettings.demRate,now-dem.t):0;
 const tdEndC=td=>td.t+TD_DAYS*DAYMS;
-const tdValueC=(td,now)=>td.p*grow(TD_RATE,Math.min(now,tdEndC(td))-td.t);
+const tdValueC=(td,now)=>td.p*grow(gameSettings.tdRate,Math.min(now,tdEndC(td))-td.t);
 function settleC(d,now){
   let dem=d.dem&&d.dem.a>0?{a:d.dem.a,t:d.dem.t}:{a:0,t:now};const live=[],done=[];
   for(const td of d.tds||[])(tdEndC(td)<=now?done:live).push(td);
@@ -130,12 +130,13 @@ function settleC(d,now){
   return {dem:{a:demValueC(dem,now),t:now},tds:live};
 }
 const depositsNow=()=>{const n=Date.now(),s=settleC(me,n);return s.dem.a+s.tds.reduce((a,t)=>a+tdValueC(t,n),0);};
-const overAtClient=()=>{const l=me.loan;if(!l||!(l.p>0))return null;if(owedNow()<=MOB_LIMIT)return null;if(l.over!=null)return l.over;if(l.p>=MOB_LIMIT)return l.t;return l.t+DAYMS*Math.log(MOB_LIMIT/l.p)/Math.log(1+RATE);};
+const overAtClient=()=>{const l=me.loan;if(!l||!(l.p>0))return null;if(owedNow()<=MOB_LIMIT)return null;if(l.over!=null)return l.over;if(l.p>=MOB_LIMIT)return l.t;return l.t+DAYMS*Math.log(MOB_LIMIT/l.p)/Math.log(1+gameSettings.loanRate);};
 const mobDueClient=()=>{const o=overAtClient();return o!=null&&Date.now()-o>=DAYMS;};
 const hmLeft=ms=>{const m=Math.max(0,Math.ceil(ms/6e4));return m>=60?Math.floor(m/60)+" 小時 "+(m%60)+" 分":m+" 分";};
 let checking=false;
+async function syncGameSettings(){if(!user||Date.now()-settingsSyncedAt<60000)return;settingsSyncedAt=Date.now();try{const r=await fetch(CFG.api+"/whoami",{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken()}});if(!r.ok)return;const j=await r.json(),next={...gameSettings,...j.settings};if(JSON.stringify(next)!==JSON.stringify(gameSettings)){isDev=!!j.dev;gameSettings=next;bankBuilt=false;render();}}catch{}}
 function checkMob(){if(checking||!user||!mobDueClient())return;checking=true;act("bank",{action:"check"}).finally(()=>{checking=false;});}
-const owedNow=()=>{const l=me.loan;return l&&l.p>0?l.p*Math.pow(1+RATE,Math.max(0,Date.now()-l.t)/DAYMS):0;};
+const owedNow=()=>{const l=me.loan;return l&&l.p>0?l.p*Math.pow(1+gameSettings.loanRate,Math.max(0,Date.now()-l.t)/DAYMS):0;};
 const net=()=>me.cash+Object.entries(me.hold||{}).reduce((a,[k,n])=>a+n*(stocks[k]?.price||0),0)-owedNow()+depositsNow();
 const bankAct=async(action,amount,all)=>{const r=await act("bank",{action,amount,all});
   if(r){say(action==="borrow"?`已借入 ${fmt(amount)}，目前欠款 ${fmt(r.owed)}`:(r.owed>0?`已還款，剩餘欠款 ${fmt(r.owed)}`:"已全額還清，沒有欠款了"));}return r;};
@@ -249,7 +250,7 @@ async function endNews(n){if(!confirm(`提前結束「${n.title}」？活動的�
 let newsSig="";
 function renderNews(){
   const form=$("nform");
-  if(isDev&&!form.firstChild)buildNewsForm(form);
+  if(isDev&&!form.firstChild){buildNewsForm(form);buildDeveloperGameSettings(form);}
   if(!isDev&&form.firstChild){form.replaceChildren();nf=null;}
   if(nf)syncEffRows();
   const sig=JSON.stringify([newsList.map(n=>[n.id,n.endsAt>nowS(),!!(me.claims&&Object.hasOwn(me.claims,n.id))]),isDev,(odds?.events||[]).map(e=>e.id),newsErr,busy,!!user]);
@@ -288,6 +289,15 @@ function buildNewsForm(host){
     el("h2",{class:"h2",text:"待發布新聞"}),nf.scheduledHost));
   host.append(w);syncEffRows();loadScheduledNews();
 }
+function buildDeveloperGameSettings(host){
+  const input=(id,label,value)=>{const field=el("input",{class:"px-in",type:"number",min:"0",max:"100",step:"0.1",value:String(value),id,"aria-label":label});return [el("label",{class:"lbl",for:id,text:label}),field];};
+  const [loanLabel,loan]=input("cfg-loan","借款日利率（%）",gameSettings.loanRate*100),[demLabel,dem]=input("cfg-dem","活存日利率（%）",gameSettings.demRate*100),[tdLabel,td]=input("cfg-td","定存日利率（%）",gameSettings.tdRate*100);
+  const [thLabel,th]=input("cfg-threshold","造物相似度門檻（%）",gameSettings.threshold);th.step="1";
+  const section=el("section",{class:"win","aria-label":"開發者遊戲設定"});
+  section.append(winBar("⚙ GAME SETTINGS.EXE"),el("div",{class:"body"},el("p",{class:"mu",text:"僅開發者可見。利率以日為單位連續複利；造物門檻為 1–99 的整數百分比。"}),loanLabel,loan,demLabel,dem,tdLabel,td,thLabel,th,
+    el("button",{class:"px-btn pri",type:"button",text:"儲存遊戲設定",disabled:busy,onclick:async()=>{const r=await act("admin-settings",{action:"save",loanRate:Number(loan.value),demRate:Number(dem.value),tdRate:Number(td.value),threshold:Number(th.value)});if(r){gameSettings=r.settings;bankBuilt=false;say("遊戲設定已更新");}}})));
+  host.append(section);
+}
 async function loadScheduledNews(){
   if(!isDev||!user||!nf?.scheduledHost)return;
   const host=nf.scheduledHost;host.replaceChildren(el("p",{class:"mu",text:"載入預定新聞…"}));
@@ -321,14 +331,14 @@ function buildBank(){
   const w=el("section",{class:"win","aria-label":"銀行"});
   w.append(winBar("🏦 BANK.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
   const b=el("div",{class:"body"});
-  const hr=((Math.pow(1+RATE,1/24)-1)*100).toFixed(2);
+  const hr=((Math.pow(1+gameSettings.loanRate,1/24)-1)*100).toFixed(2);
   bk.owed=el("b");bk.cash=el("b");bk.mob=el("b");bk.next=el("b");bk.times=el("p",{class:"mu"});
   bk.amt=el("input",{class:"px-in",type:"number",inputmode:"decimal",min:"0.01",step:"0.01",placeholder:"金額",id:"bamt","aria-label":"金額"});
   bk.b1=el("button",{class:"px-btn pri",type:"button",text:"借款",onclick:()=>{const a=parseFloat(bk.amt.value);if(!(a>0))return say("請輸入金額");bankAct("borrow",a).then(r=>{if(r)bk.amt.value="";});}});
   bk.b2=el("button",{class:"px-btn",type:"button",text:"還款",onclick:()=>{const a=parseFloat(bk.amt.value);if(!(a>0))return say("請輸入金額");bankAct("repay",a).then(r=>{if(r)bk.amt.value="";});}});
   bk.b3=el("button",{class:"px-btn",type:"button",text:"全額還清",onclick:()=>bankAct("repay",0,true)});
   b.append(
-    el("p",{class:"mu",text:`高利貸：利率 5%／24 小時（約每小時 ${hr}%，利息持續複利累計），想借多少都行。`}),
+    el("p",{class:"mu",text:`高利貸：利率 ${(gameSettings.loanRate*100).toFixed(2)}%／24 小時（約每小時 ${hr}%，利息持續複利累計），想借多少都行。`}),
     el("div",{class:"grid"},
       el("div",{class:"cell debt"},el("span",{class:"k",text:"目前欠款"}),bk.owed),el("div",{class:"cell"},el("span",{class:"k",text:"現金"}),bk.cash),
       el("div",{class:"cell"},el("span",{class:"k",text:"黑道上門倒數"}),bk.mob),el("div",{class:"cell debt"},el("span",{class:"k",text:"24 小時後欠款"}),bk.next)),
@@ -352,7 +362,7 @@ function buildSavings(v){
   const btn=(label,action,extra,pri)=>el("button",{class:"px-btn"+(pri?" pri":""),type:"button",text:label,onclick:()=>depAct(action,extra)});
   sv.btns=[btn("存入活存","dem_in",{},true),btn("領出活存","dem_out"),btn("全部領出","dem_out",{all:true}),btn(`存入定存（${TD_DAYS} 天）`,"td_in")];
   w.append(el("div",{class:"body"},
-    el("p",{class:"mu",text:`活存：日利率 ${DEM_RATE*100}%，隨時存取。定存：日利率 ${TD_RATE*100}%，鎖 ${TD_DAYS} 天，到期自動轉入活存；提前解約只退本金，利息作廢。`}),
+    el("p",{class:"mu",text:`活存：日利率 ${gameSettings.demRate*100}%，隨時存取。定存：日利率 ${gameSettings.tdRate*100}%，鎖 ${TD_DAYS} 天，到期自動轉入活存；提前解約只退本金，利息作廢。`}),
     el("div",{class:"grid"},
       el("div",{class:"cell"},el("span",{class:"k",text:"活存餘額"}),sv.dem),el("div",{class:"cell"},el("span",{class:"k",text:"定存（含利息）"}),sv.td),
       el("div",{class:"cell"},el("span",{class:"k",text:"存款總額"}),sv.sum),el("div",{class:"cell"},el("span",{class:"k",text:"每日利息（估）"}),sv.day)),
@@ -362,7 +372,7 @@ function buildSavings(v){
 }
 function updateSavings(){
   const now=Date.now(),s=settleC(me,now),tdv=s.tds.map(t=>tdValueC(t,now)),tdTotal=tdv.reduce((a,x)=>a+x,0);
-  sv.dem.textContent=fmt(s.dem.a);sv.td.textContent=fmt(tdTotal);sv.sum.textContent=fmt(s.dem.a+tdTotal);sv.day.textContent=fmt(s.dem.a*DEM_RATE+tdTotal*TD_RATE);
+  sv.dem.textContent=fmt(s.dem.a);sv.td.textContent=fmt(tdTotal);sv.sum.textContent=fmt(s.dem.a+tdTotal);sv.day.textContent=fmt(s.dem.a*gameSettings.demRate+tdTotal*gameSettings.tdRate);
   const sig=JSON.stringify(s.tds.map(t=>t.t));
   if(sig!==sv.sig){sv.sig=sig;sv.list.replaceChildren();sv.rows=s.tds.map(t=>{
     const span=el("span",{class:"mu"});
@@ -376,7 +386,7 @@ function updateBank(){
   if(!bankBuilt)buildBank();
   updateSavings();
   const o=owedNow();bk.owed.textContent=fmt(o);bk.cash.textContent=fmt(me.cash);
-  bk.next.textContent=fmt(o*(1+RATE));
+  bk.next.textContent=fmt(o*(1+gameSettings.loanRate));
   const ov=overAtClient(),left_=ov==null?0:ov+DAYMS-Date.now();
   bk.mob.textContent=ov==null?`安全（≤${MOB_LIMIT}）`:left_<=0?"⚠ 黑道已在門口":"⚠ "+hmLeft(left_);bk.mob.className=ov==null?"":"hot";
   bk.times.textContent=me.bankrupt>0?`你被黑道找上過 ${me.bankrupt} 次。`:"";
@@ -411,10 +421,11 @@ function renderSet(){
     onclick:()=>{scaleKey=k;try{localStorage.setItem("ui",k);}catch{}applyScale();renderSet();}})));
   const pname=el("input",{class:"px-in",maxlength:"20",placeholder:"輸入排行榜顯示名稱",value:me.customName||"",disabled:!user,"aria-label":"排行榜顯示名稱"});
   const saveName=el("button",{class:"px-btn pri",type:"button",text:"儲存名稱",disabled:!user,onclick:async()=>{const r=await act("profile",{name:pname.value});if(r){me.customName=r.name;say("排行榜名稱已更新");renderSet();}}});
-  w.append(el("div",{class:"body"},el("h2",{class:"h2",text:"玩家名稱"}),el("p",{class:"mu",text:user?"排行榜會顯示這個名稱；留空不允許。最多 20 字。":"登入後即可設定排行榜顯示名稱。"}),pname,saveName,
+  const body=el("div",{class:"body"},el("h2",{class:"h2",text:"玩家名稱"}),el("p",{class:"mu",text:user?"排行榜會顯示這個名稱；留空不允許。最多 20 字。":"登入後即可設定排行榜顯示名稱。"}),pname,saveName,
     el("h2",{class:"h2",text:"介面大小"}),seg,
     el("h2",{class:"h2",text:"Google API Key"}),el("p",{class:"mu",text:"AI 判定造物時使用你自己的 Key；也可以按右上角的 ⚙。"}),
-    el("button",{class:"px-btn",type:"button",text:"開啟 API 設定",onclick:()=>$("settings").showModal()})));
+    el("button",{class:"px-btn",type:"button",text:"開啟 API 設定",onclick:()=>$("settings").showModal()}));
+  w.append(body);
   v.append(w);
 }
 // ---------- 分頁 ----------
@@ -427,6 +438,7 @@ function setView(v){
   render();window.scrollTo(0,0);
 }
 function render(){
+  const rule=document.querySelector(".rule");if(rule)rule.textContent=`股價會自己隨機漲跌。AI 會替造物評出與股票主題的相似度（0–100）：超過目前 ${gameSettings.threshold}% 門檻才算相關，會提高上漲機率；低於門檻會提高下跌機率（越接近門檻影響越小），效果會慢慢消退。每個造物只能投入一次，不能重複。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力；每個人的影響都很小，人多才會明顯。`;
   if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：可以在造物視窗直接打字輸入造物名稱":!token?"買賣與銀行可以直接玩；連結《無限煉製》帳號才能投入造物":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」":"";
   if(me.jailUntil>Date.now())$("msg").textContent="你目前正在服刑，剩餘 "+prisonLeft(me.jailUntil)+"；服刑期間不能進行遊戲操作。";
   renderStrip();
@@ -499,7 +511,7 @@ function wireNav(){
   $("menu").onclick=()=>dr.showModal();$("dclose").onclick=()=>dr.close();
   dr.addEventListener("click",e=>{if(e.target===dr)dr.close();});
   dr.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>{dr.close();setView(b.dataset.v);});
-  setInterval(()=>{refreshGauges();if(isDev&&++oddsTick%4===0)fetchOdds();if(view==="news")updateNewsTimes();checkMob();if(me.jailUntil&&me.jailUntil<=Date.now()){me.jailUntil=0;render();}const open=marketOpenClient();if(view==="trade"&&marketOpenPrev!==open){marketOpenPrev=open;render();}if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
+  setInterval(()=>{refreshGauges();if(isDev&&++oddsTick%4===0)fetchOdds();syncGameSettings();if(view==="news")updateNewsTimes();checkMob();if(me.jailUntil&&me.jailUntil<=Date.now()){me.jailUntil=0;render();}const open=marketOpenClient();if(view==="trade"&&marketOpenPrev!==open){marketOpenPrev=open;render();}if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
 }
 function renderFeed(rows){
   const f=$("feed");f.replaceChildren();
@@ -529,7 +541,7 @@ async function main(){
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
   onAuthStateChanged(auth,u=>{
     user=u;isDev=false;craftSig="";analystReport=null;analystStock="";offP&&offP();offP=null;
-    if(u)u.getIdToken().then(t=>fetch(CFG.api+"/whoami",{method:"POST",headers:{Authorization:"Bearer "+t}})).then(r=>r.json()).then(j=>{isDev=!!j.dev;craftSig="";render();if(isDev)fetchOdds();}).catch(()=>{});
+    if(u)u.getIdToken().then(t=>fetch(CFG.api+"/whoami",{method:"POST",headers:{Authorization:"Bearer "+t}})).then(r=>r.json()).then(j=>{isDev=!!j.dev;gameSettings={...gameSettings,...j.settings};craftSig="";bankBuilt=false;render();if(isDev)fetchOdds();}).catch(()=>{});
     if(u)offP=onSnapshot(doc(db,"players",u.uid),snap=>{me=snap.exists()?{...snap.data()}:{cash:CFG.startCash,hold:{},name:u.displayName||"玩家"};render();checkMob();});
     else me={cash:CFG.startCash,hold:{},name:"訪客"};
     render();

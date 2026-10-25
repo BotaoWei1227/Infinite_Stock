@@ -99,3 +99,17 @@ dialog.win.drawer{margin:0;inset:0 auto 0 0;height:100%;max-height:100%;width:mi
 textarea.px-in{resize:vertical;min-height:96px;font-family:inherit}
 .fx{display:grid;grid-template-columns:1fr auto 76px;gap:8px;align-items:center;margin:6px 0}.fx select,.fx input{min-height:40px}
 .fx .px-sel{width:auto}.unit{display:flex;gap:8px}.unit .px-in{flex:1}.unit .px-sel{width:auto}
+
+/* 頁尾像素上班族：純 CSS 裝飾，只在瀏覽器端動畫 */
+.pixel-office{position:relative;overflow:hidden;margin:26px -12px -28px;padding:12px 12px 24px;background:linear-gradient(#111936 0 68%,#26345d 68% 72%,#10172f 72%);border-top:3px solid #43558c;min-height:128px}
+.office-caption{color:var(--mu);font:10px "Press Start 2P",monospace;letter-spacing:1px;text-align:center}
+.office-walkway{position:relative;height:76px;overflow:hidden;border-bottom:4px solid #070b18}
+.office-person{position:absolute;bottom:4px;left:-52px;width:44px;height:48px;animation:office-walk 18s linear infinite;image-rendering:pixelated;white-space:nowrap}
+.office-person::before{content:"";position:absolute;left:16px;top:3px;width:8px;height:8px;background:#f2bb83;box-shadow:-4px 4px #f2bb83,4px 4px #f2bb83,0 4px #2b1b27,4px 0 #2b1b27,-4px 0 #2b1b27}
+.office-person::after{content:"";position:absolute;left:12px;top:15px;width:8px;height:12px;background:#315ba8;box-shadow:8px 0 #315ba8,4px 0 #315ba8,0 4px #315ba8,8px 4px #315ba8,-4px 4px #f2bb83,12px 4px #f2bb83,0 8px #315ba8,8px 8px #315ba8,0 12px #202c49,8px 12px #202c49}
+.office-person i{position:absolute;z-index:1;left:28px;top:18px;width:9px;height:13px;border:2px solid #4de2ff;background:#10172f;color:transparent;font-size:0;transform:rotate(-12deg)}
+.person-two::after{background:#ae4176;box-shadow:8px 0 #ae4176,4px 0 #ae4176,0 4px #ae4176,8px 4px #ae4176,-4px 4px #f2bb83,12px 4px #f2bb83,0 8px #ae4176,8px 8px #ae4176,0 12px #202c49,8px 12px #202c49}
+.person-three::after{background:#378879;box-shadow:8px 0 #378879,4px 0 #378879,0 4px #378879,8px 4px #378879,-4px 4px #f2bb83,12px 4px #f2bb83,0 8px #378879,8px 8px #378879,0 12px #202c49,8px 12px #202c49}
+.person-two{animation-delay:-7s;animation-duration:22s}.person-three{animation-delay:-13s;animation-duration:20s}
+@keyframes office-walk{0%{left:-52px;transform:translateY(0) scaleX(1)}10%{transform:translateY(-3px) scaleX(1)}20%{transform:translateY(0) scaleX(1)}30%{transform:translateY(-3px) scaleX(1)}40%{transform:translateY(0) scaleX(1)}50%{transform:translateY(-3px) scaleX(1)}60%{transform:translateY(0) scaleX(1)}70%{transform:translateY(-3px) scaleX(1)}80%{transform:translateY(0) scaleX(1)}90%{transform:translateY(-3px) scaleX(1)}100%{left:calc(100% + 52px);transform:translateY(0) scaleX(1)}}
+@media (prefers-reduced-motion:reduce){.office-person{animation:none;left:calc(20% + var(--person-offset,0px))}.person-two{left:50%}.person-three{left:75%}}
