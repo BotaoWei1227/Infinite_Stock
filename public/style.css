@@ -1,4 +1,4 @@
-:root{--bg:#0F172A;--panel:#1E293B;--line:#10B981;--cyan:#EF4444;--mag:#2447a6;--amber:#ffcf5a;--tx:#e8eeff;--mu:#93a3d6;--up:#ff5d6c;--dn:#34e0a1;--sh:#04060e}
+:root{--bg:#0F172A;--panel:#1E293B;--line:#10B981;--cyan:#C55A60;--mag:#2447a6;--amber:#ffcf5a;--tx:#e8eeff;--mu:#93a3d6;--up:#ff5d6c;--dn:#34e0a1;--sh:#04060e}
 *{box-sizing:border-box}
 html{color-scheme:dark}
 body{zoom:var(--zoom,1);margin:0 auto;max-width:720px;background:var(--bg);color:var(--tx);
