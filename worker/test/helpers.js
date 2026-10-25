@@ -4,6 +4,7 @@ export function fakeDb(){
   return {m,failNext:0,
     async get(p){const x=m.get(p);return x?{data:structuredClone(x.data),version:x.v}:null;},
     async empty(c){return ![...m.keys()].some(k=>k.startsWith(c+"/"));},
+    async list(c){return [...m].filter(([k])=>k.startsWith(c+"/")).map(([k,v])=>({id:k.slice(c.length+1),data:structuredClone(v.data)}));},
     async commit(ops){
       if(this.failNext>0){this.failNext--;throw new HttpError(409,"conflict","x");}
       for(const o of ops){const x=m.get(o.path);

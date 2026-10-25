@@ -56,6 +56,16 @@ export function makeDb(env,fetchFn=fetch){
       if(!r.ok)throw new HttpError(503,"unavailable","資料庫暫時無法使用");
       const d=await r.json();return !(d.documents&&d.documents.length);
     },
+    async list(col){
+      const docs=[];let pageToken="";
+      do{
+        const q=new URL(`${api}/${col}`);q.searchParams.set("pageSize","1000");if(pageToken)q.searchParams.set("pageToken",pageToken);
+        const r=await fetchFn(q,{headers:await H()});
+        if(!r.ok)throw new HttpError(503,"unavailable","資料庫暫時無法使用");
+        const d=await r.json();for(const x of d.documents||[])docs.push({id:x.name.split("/").pop(),data:decode({mapValue:{fields:x.fields||{}}})});pageToken=d.nextPageToken||"";
+      }while(pageToken&&docs.length<10000);
+      return docs;
+    },
     // ops: [{path, data, ts:[欄位], pre}]；pre=null 代表必須不存在，字串代表 updateTime 必須相符；整批原子提交
     async commit(ops){
       const writes=ops.map(o=>{

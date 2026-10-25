@@ -49,15 +49,17 @@ export async function tick(d){
   });
 }
 
-const STRIKE_MSG="欠款太多又拖過一天，黑道找上門了！資產被清空，只能重新開始。";
-// 黑道：欠款連續超過上限滿 24 小時 → 清空資產（保留已投入紀錄），並在全服動態留下一筆
+const STRIKE_MSG="欠款太多又拖過一天，黑道找上門了！資產已重製，並被關押 24 小時。";
+const SENTENCE=864e5,PLAYER_ROBBERY_FEE=10000,ROBBERY_FINE=10000,BANK_ROBBERY_FEE=5000,BANK_LOOT=50000;
+function assertFree(p,now){if((p?.data.jailUntil||0)>now)throw new HttpError(403,"imprisoned",`你仍在服刑，${new Date(p.data.jailUntil).toISOString()} 後才能行動`);}
+// 黑道：欠款連續超過上限滿 24 小時 → 資產重製，並關押 24 小時
 async function strikeIfDue(d,pid,p){
   const now=d.now();
   if(!p||!L.mobDue(p.data.loan,now))return;
   const owed=Math.round(L.owed(p.data.loan,now)*100)/100;
   await d.db.commit([
-    {path:pid,data:{cash:START,hold:{},loan:{p:0,t:now},dem:{a:0,t:now},tds:[],bankrupt:(p.data.bankrupt||0)+1},pre:p.version},
-    {path:`feed/${crypto.randomUUID()}`,data:{who:p.data.name||"玩家",mob:true,owed},ts:["at"],pre:null}]);
+    {path:pid,data:{cash:START,hold:{},loan:{p:0,t:now},dem:{a:0,t:now},tds:[],bankrupt:(p.data.bankrupt||0)+1,jailUntil:now+SENTENCE},pre:p.version},
+    {path:`feed/${crypto.randomUUID()}`,data:{who:p.data.customName||p.data.name||"玩家",mob:true,owed},ts:["at"],pre:null}]);
   throw new HttpError(409,"mob",STRIKE_MSG);
 }
 // 開發者：以 Google 驗證過的信箱比對（名單在機密 DEV_EMAILS），可免 IA、自行輸入造物
@@ -90,7 +92,7 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
     if(!dev&&L.usedBefore(p?.data.used,itemName))throw new HttpError(409,"failed-precondition","這個造物你已經投入過了（同一個造物只能投入一次，不能重複）");
     const now=d.now(),bias=L.nudge(L.effOdds(o.data.bias?.[stockId],now),j.score);   // 只改變上漲機率；價格由排程隨機走，投入當下不會跳動
     const up=Math.round(L.upProb(bias+L.eventShift(o.data.events,stockId,now))*100);
-    const who=dev?(a.name||"開發者"):(me.workshopName||a.name||"無名工坊");
+    const who=p?.data.customName|| (dev?(a.name||"開發者"):(me.workshopName||a.name||"無名工坊"));
     await d.db.commit([
       {path:MP,data:{stocks:{...stocks,[stockId]:{...s,last:`${itemName}（${j.score}分）`}}},ts:["updatedAt"],pre:m.version},
       {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:bias,at:now}}},pre:o.version},
@@ -204,23 +206,74 @@ async function news(d,a,body={}){
   if(!isDev(d,a))throw new HttpError(403,"permission-denied","只有開發者可以發布或結束活動");
   return body.action==="publish"?newsPublish(d,a,body):newsEnd(d,body);
 }
+async function setPlayerName(d,a,{name}={}){
+  if(typeof name!=="string")throw bad("名稱格式不正確");name=name.trim();
+  if(!name||name.length>20||/[\u0000-\u001f]/.test(name))throw bad("名稱需為 1–20 字，且不能包含控制字元");
+  const path=`players/${a.uid}`;
+  return retry(async()=>{const p=await d.db.get(path);await d.db.commit([{path,data:{...(p?{}:{cash:START,hold:{},name:a.name||"玩家"}),customName:name},pre:p?p.version:null}]);return {ok:true,name};});
+}
+async function leaderboard(d,a){
+  const [players,m]=await Promise.all([d.db.list("players"),d.db.get(MP)]),stocks=m?.data.stocks||{},now=d.now();
+  return {rows:players.map(({id,data:p})=>({isMe:id===a.uid,name:p.customName||p.name||"玩家",value:Math.round((Number(p.cash||0)+Object.entries(p.hold||{}).reduce((n,[id,q])=>n+Number(q||0)*Number(stocks[id]?.price||0),0)-L.owed(p.loan,now)+L.depositsValue(p,now))*100)/100})).sort((a,b)=>b.value-a.value||a.name.localeCompare(b.name,"zh-Hant")).slice(0,100)};
+}
+async function blackmarket(d,a,{action,targetUid}={}){
+  if(action==="targets"){
+    const players=await d.db.list("players");
+    return {targets:players.filter(x=>x.id!==a.uid).map(({id,data:p})=>({uid:id,name:p.customName||p.name||"玩家",cash:Math.round(Number(p.cash||0)*100)/100})).sort((x,y)=>x.name.localeCompare(y.name,"zh-Hant"))};
+  }
+  if(!["rob-player","rob-bank"].includes(action))throw bad("黑市行動不正確");
+  if(action==="rob-player"&&(!/^[^/]{1,128}$/.test(targetUid||"")||targetUid===a.uid))throw bad("請選擇其他玩家");
+  return retry(async()=>{
+    const now=d.now(),pid=`players/${a.uid}`,p=await d.db.get(pid);await strikeIfDue(d,pid,p);assertFree(p,now);
+    const fee=action==="rob-player"?PLAYER_ROBBERY_FEE:BANK_ROBBERY_FEE;
+    const fine=ROBBERY_FINE,minimum=fee+fine;
+    if(Number(p?.data.cash??START)<minimum)throw new HttpError(409,"failed-precondition",`現金至少需要 ${minimum} 元（含可能的罰金準備金）`);
+    const caught=(d.secureRand?d.secureRand():d.rand())>=(action==="rob-player" ? 0.3 : 0.1);
+    if(caught){
+      const jailUntil=now+SENTENCE,cash=Math.round((Number(p?.data.cash??START)-fee-fine)*100)/100;
+      await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash,jailUntil,robberies:(p?.data.robberies||0)+1},pre:p?p.version:null},
+        {path:`feed/${crypto.randomUUID()}`,data:{who:p?.data.customName||p?.data.name||a.name||"玩家",robbery:true,caught:true,kind:action},ts:["at"],pre:null}]);
+      return {ok:true,caught:true,fine,jailUntil,fee};
+    }
+    if(action==="rob-bank"){
+      const cash=Math.round((Number(p?.data.cash??START)-fee+BANK_LOOT)*100)/100;
+      await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash,robberies:(p?.data.robberies||0)+1},pre:p?p.version:null},
+        {path:`feed/${crypto.randomUUID()}`,data:{who:p?.data.customName||p?.data.name||a.name||"玩家",robbery:true,caught:false,kind:action},ts:["at"],pre:null}]);
+      return {ok:true,caught:false,loot:BANK_LOOT,fee};
+    }
+    const victimPath=`players/${targetUid}`,victim=await d.db.get(victimPath);
+    if(!victim)throw new HttpError(404,"not-found","找不到這位玩家");
+    const stolen=Math.round(Number(victim.data.cash||0)*.3*100)/100;
+    await d.db.commit([
+      {path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash:Math.round((Number(p?.data.cash??START)-fee+stolen)*100)/100,robberies:(p?.data.robberies||0)+1},pre:p?p.version:null},
+      {path:victimPath,data:{cash:Math.round((Number(victim.data.cash||0)-stolen)*100)/100},pre:victim.version},
+      {path:`feed/${crypto.randomUUID()}`,data:{who:p?.data.customName||p?.data.name||a.name||"玩家",robbery:true,caught:false,kind:action},ts:["at"],pre:null}]);
+    return {ok:true,caught:false,stolen,fee};
+  });
+}
 export async function route(req,env,d){
   if(req.method==="OPTIONS")return new Response(null,{status:204,headers:cors(env)});
   const path=new URL(req.url).pathname;
   try{
     if(req.method!=="POST")throw new HttpError(405,"invalid-argument","方法不允許");
     if(path==="/ensure-market")return out(env,200,await ensureMarket(d));
-    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"){
+    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"||path==="/profile"||path==="/leaderboard"||path==="/blackmarket"){
       const a=await d.verify(req);
       if(a.provider!=="google.com")throw new HttpError(401,"unauthenticated","請先以 Google 帳號登入");
       if(path==="/whoami")return out(env,200,{dev:isDev(d,a)});
+      if(path==="/leaderboard")return out(env,200,await leaderboard(d,a));
+      if(path==="/blackmarket"&&req.method==="POST"){
+        const preBody=await req.clone().json().catch(()=>({}));
+        if(preBody.action==="targets")return out(env,200,await blackmarket(d,a,preBody));
+      }
       if(path==="/odds"){   // 只有開發者看得到各股票的上漲機率（偏移與活動影響）；一般玩家一律 403
         if(!isDev(d,a))throw new HttpError(403,"permission-denied","只有開發者可以查看");
         const o=await loadOdds(d),now=d.now();
         return out(env,200,{now,bias:o.data.bias||{},events:L.activeEvents(o.data.events,now)});
       }
       let body;try{body=await req.json();}catch{throw bad("請求格式錯誤");}
-      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:trade)(d,a,body));
+      if(path!=="/leaderboard"&&path!=="/blackmarket")assertFree(await d.db.get(`players/${a.uid}`),d.now());
+      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:path==="/profile"?setPlayerName:path==="/blackmarket"?blackmarket:trade)(d,a,body));
     }
     throw new HttpError(404,"not-found","找不到");
   }catch(e){

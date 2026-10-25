@@ -6,6 +6,7 @@ import {getFirestore,collection,doc,onSnapshot,query,orderBy,limit} from "https:
 const REDIRECT=location.origin+location.pathname; // 必須與 Developer Center 的 Redirect URI 完全一致
 const $=id=>document.getElementById(id),S=sessionStorage;
 const fmt=n=>(Math.round(n*100)/100).toFixed(2);
+const prisonLeft=until=>hmLeft(until-Date.now());
 let hinting=true;
 const say=t=>{hinting=false;$("msg").textContent=t;};
 let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="",odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0;
@@ -166,7 +167,8 @@ function renderStrip(){
   s.append(
     chip(!!user,user?"Google："+(user.displayName||user.email||"已登入"):"以 Google 帳號登入",()=>{if(user){if(confirm("登出 Google？"))signOut(auth);}else gLogin();}),
     chip(!!token,token?"工坊："+(profile?.workshopName||"已連結"):"連結《無限煉製》帳號",()=>{if(token){if(confirm("中斷《無限煉製》連線？"))logoutIA();}else login();}),
-    el("div",{class:"stat"},el("span",{class:"k",text:"現金 "}),el("b",{text:fmt(me.cash)}),el("span",{class:"k",text:"　淨值 "}),el("b",{text:fmt(net())})));
+    el("div",{class:"stat"},el("span",{class:"k",text:"現金 "}),el("b",{text:fmt(me.cash)}),el("span",{class:"k",text:"　淨資產 "}),el("b",{text:fmt(net())})),
+    ...(me.jailUntil>Date.now()?[el("div",{class:"cell debt",text:"⛓ 服刑中・剩 "+prisonLeft(me.jailUntil)})]:[]));
 }
 let craftSig="";
 function renderCraft(){
@@ -388,13 +390,16 @@ function renderSet(){
   const seg=el("div",{class:"seg",role:"group","aria-label":"介面大小"});
   Object.entries(SCALES).forEach(([k,[name]])=>seg.append(el("button",{class:"px-btn",type:"button","aria-pressed":String(k===scaleKey),text:name,
     onclick:()=>{scaleKey=k;try{localStorage.setItem("ui",k);}catch{}applyScale();renderSet();}})));
-  w.append(el("div",{class:"body"},el("h2",{class:"h2",text:"介面大小"}),seg,
+  const pname=el("input",{class:"px-in",maxlength:"20",placeholder:"輸入排行榜顯示名稱",value:me.customName||"",disabled:!user,"aria-label":"排行榜顯示名稱"});
+  const saveName=el("button",{class:"px-btn pri",type:"button",text:"儲存名稱",disabled:!user,onclick:async()=>{const r=await act("profile",{name:pname.value});if(r){me.customName=r.name;say("排行榜名稱已更新");renderSet();}}});
+  w.append(el("div",{class:"body"},el("h2",{class:"h2",text:"玩家名稱"}),el("p",{class:"mu",text:user?"排行榜會顯示這個名稱；留空不允許。最多 20 字。":"登入後即可設定排行榜顯示名稱。"}),pname,saveName,
+    el("h2",{class:"h2",text:"介面大小"}),seg,
     el("h2",{class:"h2",text:"Google API Key"}),el("p",{class:"mu",text:"AI 判定造物時使用你自己的 Key；也可以按右上角的 ⚙。"}),
     el("button",{class:"px-btn",type:"button",text:"開啟 API 設定",onclick:()=>$("settings").showModal()})));
   v.append(w);
 }
 // ---------- 分頁 ----------
-const VIEWS={trade:"v-trade",news:"v-news",bank:"v-bank",work:"v-work",set:"v-set"},HASH={trade:"",news:"#news",bank:"#bank",work:"#work",set:"#settings"};
+const VIEWS={trade:"v-trade",rank:"v-rank",black:"v-black",news:"v-news",bank:"v-bank",work:"v-work",set:"v-set"},HASH={trade:"",rank:"#rank",black:"#black",news:"#news",bank:"#bank",work:"#work",set:"#settings"};
 function setView(v){
   if(!VIEWS[v])v="trade";view=v;
   for(const [k,id] of Object.entries(VIEWS))$(id).hidden=k!==v;
@@ -404,25 +409,60 @@ function setView(v){
 }
 function render(){
   if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：可以在造物視窗直接打字輸入造物名稱":!token?"買賣與銀行可以直接玩；連結《無限煉製》帳號才能投入造物":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」":"";
+  if(me.jailUntil>Date.now())$("msg").textContent="你目前正在服刑，剩餘 "+prisonLeft(me.jailUntil)+"；服刑期間不能進行遊戲操作。";
   renderStrip();
   if(view==="trade"){renderCraft();renderMarket();}
+  else if(view==="rank")renderRank();
+  else if(view==="black")renderBlackmarket();
   else if(view==="news")renderNews();
   else if(view==="bank")updateBank();
   else if(view==="work")renderWork();
   else renderSet();
+}
+async function renderRank(){
+  const host=$("ranklist");host.replaceChildren();
+  if(!user){host.append(el("p",{class:"mu",text:"登入 Google 帳號後查看排行榜。"}));return;}
+  host.append(el("p",{class:"mu",text:"富士比排行榜依淨資產排序（現金＋持股市值＋存款−欠款），顯示前 100 名。"}));
+  try{const r=await fetch(CFG.api+"/leaderboard",{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:"{}"}),j=await r.json();if(!r.ok)throw Error(j.error?.message||"載入失敗");
+    const ol=el("ol",{class:"list"});j.rows.forEach((x,i)=>ol.append(el("li",{},el("span",{text:`${i+1}. ${x.name}${x.isMe?"（我）":""}`}),el("b",{text:fmt(x.value)}))));host.append(ol);
+    if(!j.rows.length)host.append(el("p",{class:"mu",text:"目前還沒有玩家資料。"}));
+  }catch(e){host.append(el("p",{class:"warn",text:"排行榜載入失敗："+e.message}));}
+}
+async function renderBlackmarket(){
+  const host=$("blackmarket");host.replaceChildren();
+  if(!user){host.append(el("p",{class:"mu",text:"登入 Google 帳號後使用黑市。"}));return;}
+  host.append(el("p",{class:"warn",text:"搶玩家：黑市費 10,000 元，成功率 30%，搶走對方現金的 30%；被抓機率 70%，另罰 10,000 元並服刑 24 小時。被抓時搶款不會轉出，需備妥 20,000 元。"}),
+    el("p",{class:"warn",text:"搶銀行：黑市費 5,000 元，成功率 10%；成功獲得 50,000 元。失敗被捕，罰 10,000 元並服刑 24 小時，需備妥 15,000 元。"}));
+  if(me.jailUntil>Date.now()){host.append(el("p",{class:"hot",text:"你正在服刑，還要 "+prisonLeft(me.jailUntil)+"。"}));return;}
+  const sel=el("select",{class:"px-sel","aria-label":"選擇搶劫目標"});sel.append(new Option("載入玩家名單…",""));
+  const result=el("div",{class:"mu"});
+  const playerBtn=el("button",{class:"px-btn pri",type:"button",disabled:true,text:"搶這位玩家",onclick:async()=>{
+    if(!sel.value)return say("請選擇目標玩家");if(!confirm("確定花 10,000 元嘗試搶劫？被抓另罰 10,000 元並關押一天。"))return;
+    const r=await act("blackmarket",{action:"rob-player",targetUid:sel.value});if(r){say(r.caught?"被捕！罰金 "+fmt(r.fine)+"，服刑 24 小時；搶款已歸還。":"得手！搶到 "+fmt(r.stolen)+"，已扣除黑市費 "+fmt(r.fee)+"。");renderStrip();}
+  }});
+  sel.onchange=()=>{playerBtn.disabled=busy||!sel.value;};
+  const bankBtn=el("button",{class:"px-btn",type:"button",disabled:busy||Number(me.cash)<15000,text:"搶銀行",onclick:async()=>{
+    if(!confirm("確定花 5,000 元搶銀行？成功可得 50,000 元，失敗會被捕、罰 10,000 元並關押一天。"))return;
+    const r=await act("blackmarket",{action:"rob-bank"});if(r){say(r.caught?"銀行警鈴響了！罰金 "+fmt(r.fine)+"，服刑 24 小時。":"成功搶到 "+fmt(r.loot)+"！已扣除費用 "+fmt(r.fee)+"。");renderStrip();}
+  }});
+  host.append(el("label",{class:"lbl",text:"搶劫玩家目標"}),sel,el("div",{class:"row"},playerBtn,bankBtn),result);
+  try{const r=await fetch(CFG.api+"/blackmarket",{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:JSON.stringify({action:"targets"})}),j=await r.json();if(!r.ok)throw Error(j.error?.message||"載入失敗");
+    sel.replaceChildren(new Option("▼ 選擇玩家",""));j.targets.forEach(t=>sel.append(new Option(t.name+"（現金 "+fmt(t.cash)+"）",t.uid)));playerBtn.disabled=busy||!sel.value;
+  }catch(e){sel.replaceChildren(new Option("玩家名單載入失敗："+e.message,""));}
 }
 function wireNav(){
   const dr=$("drawer");
   $("menu").onclick=()=>dr.showModal();$("dclose").onclick=()=>dr.close();
   dr.addEventListener("click",e=>{if(e.target===dr)dr.close();});
   dr.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>{dr.close();setView(b.dataset.v);});
-  setInterval(()=>{refreshGauges();if(isDev&&++oddsTick%4===0)fetchOdds();if(view==="news")updateNewsTimes();checkMob();if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
+  setInterval(()=>{refreshGauges();if(isDev&&++oddsTick%4===0)fetchOdds();if(view==="news")updateNewsTimes();checkMob();if(me.jailUntil&&me.jailUntil<=Date.now()){me.jailUntil=0;render();}if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
 }
 function renderFeed(rows){
   const f=$("feed");f.replaceChildren();
   if(!rows.length)f.append(el("div",{class:"mu",text:"還沒有人投入造物"}));
   rows.forEach(x=>{const t=x.at?.toDate?.();const hm=t?t.toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false}):"";
-    if(x.mob){f.append(el("div",{class:"mob"},document.createTextNode(`☠ ${x.who} 欠款 ${fmt(x.owed)} 拖過一天，被黑道找上門，資產清空重新開始`)));return;}
+    if(x.mob){f.append(el("div",{class:"mob"},document.createTextNode(`☠ ${x.who} 欠款 ${fmt(x.owed)} 拖過一天，被黑道抓走關押一天，資產重製`)));return;}
+    if(x.robbery){f.append(el("div",{class:x.caught?"dn":"up"},el("span",{class:"tm",text:hm}),document.createTextNode(`🕶 ${x.who} ${x.caught?"在黑市行動中被捕並關押一天":"完成了一次黑市行動"}`)));return;}
     f.append(el("div",{class:(x.pass!=null?x.pass:x.pct!=null?x.pct>0:x.score>=50)?"up":"dn"},el("span",{class:"tm",text:hm}),
       document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：相似度 ${x.score}${x.pass!=null?(x.pass?" ✓":" ✗"):""}${x.pct!=null?"，"+(x.pct>0?"+":"")+x.pct+"%":""}`)));});
 }
@@ -439,7 +479,7 @@ function wireSettings(){
 // ---------- 啟動 ----------
 async function main(){
   applyScale();wireSettings();wireNav();
-  setView({"#news":"news","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
+  setView({"#news":"news","#rank":"rank","#black":"black","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
   if([CFG.firebase.apiKey,CFG.ia.clientId,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase、Client ID 與 Worker 網址");return;}
   const app=initializeApp(CFG.firebase);db=getFirestore(app);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
