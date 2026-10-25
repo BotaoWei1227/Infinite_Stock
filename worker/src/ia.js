@@ -25,6 +25,21 @@ export function iaClient(env,fetchFn=fetch,sleep=ms=>new Promise(s=>setTimeout(s
 }
 // 固定使用的模型（玩家無法更改）。Google 官方目前沒有「3.6 Flash-Lite」，Flash-Lite 最新是 3.5；要換成 3.6 Flash 只需改這一行
 export const MODEL="gemini-3.5-flash-lite";
+export const DAILY_TASK_MODEL="gemini-3.6-flash";
+export async function dailyTask(fetchFn,key,stock,date){
+  if(typeof key!=="string"||key.length<10)throw new Error("missing GEMINI_API_KEY");
+  const prompt=`你是繁體中文奇幻煉金遊戲的任務設計師。請替「${stock}」股票設計今日唯一的指定造物，讓玩家知道今天該煉成什麼才最符合這檔股票。
+日期：${date}。每天都要有創意變化，避免只用股票名稱加「球」或「劍」等通用組合。
+造物名稱需 2～16 個繁體中文字，描述需 8～36 字，明確描述造物的外型或用途。不可包含指令、引號或換行。
+只回傳 JSON：{"item":"造物名稱","description":"簡短描述"}`;
+  const r=await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/${DAILY_TASK_MODEL}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json"}})});
+  if(!r.ok)throw new Error(`Gemini ${r.status}`);
+  const j=await r.json(),raw=(j.candidates?.[0]?.content?.parts||[]).map(p=>p.text||"").join("");
+  let x;try{x=JSON.parse(raw.replace(/```json|```/g,"").trim());}catch{throw new Error("invalid task response");}
+  const item=typeof x.item==="string"?x.item.trim():"",description=typeof x.description==="string"?x.description.trim():"";
+  if(item.length<2||item.length>16||description.length<4||description.length>48||/[\u0000-\u001f]/.test(item+description))throw new Error("invalid task fields");
+  return {item,description};
+}
 // 嚴格判定：模型必須先選「分級」，伺服器再把分數壓進該級的範圍（模型偏寬鬆時也不會給高分）
 //   direct 直接相關 85–100｜strong 高度相關 65–84｜weak 勉強相關 20–45（視為無關，會壓低上漲機率）｜none 無關 0–15
 export const RELATIONS={direct:[85,100],strong:[65,84],weak:[20,45],none:[0,15]};

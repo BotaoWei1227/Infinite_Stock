@@ -9,7 +9,7 @@ const fmt=n=>(Math.round(n*100)/100).toFixed(2);
 const prisonLeft=until=>hmLeft(until-Date.now());
 let hinting=true;
 const say=t=>{hinting=false;$("msg").textContent=t;};
-let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="",odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0,analystReport=null,analystStock="",tradeShares=1;
+let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},dailyTasks={date:"",tasks:{}},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="",odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0,analystReport=null,analystStock="",tradeShares=1,marketOpenPrev=null;
 
 // ---------- OAuth：Authorization Code + PKCE S256（瀏覽器端） ----------
 const b64u=b=>btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
@@ -197,7 +197,7 @@ function renderMarket(){
   const ids=Object.keys(stocks).sort();
   if(!ids.length){mk.append(el("p",{class:"mu",text:"行情載入中…"}));return;}
   for(const id of ids){
-    const s=stocks[id],open=!collapsed.has(id),first=(s.p&&s.p[0])||s.price,ch=(s.price/first-1)*100,chTxt=(ch>=0?"+":"")+ch.toFixed(2)+"%";
+    const s=stocks[id],task=dailyTasks.date===taipeiDate()?dailyTasks.tasks?.[id]:null,open=!collapsed.has(id),first=(s.p&&s.p[0])||s.price,ch=(s.price/first-1)*100,chTxt=(ch>=0?"+":"")+ch.toFixed(2)+"%";
     const n=me.hold?.[id]||0;
     const w=el("section",{class:"win stock"+(open?"":" shut"),"aria-label":s.name});
     w.append(winBar(`${s.emoji} ${id.toUpperCase()}.EXE`,[
@@ -209,6 +209,7 @@ function renderMarket(){
     b.append(
       el("div",{class:"hd"},el("span",{class:"nm",text:s.name}),el("span",{class:"px big",text:fmt(s.price)}),el("span",{class:"chg "+(ch>=0?"up":"dn"),text:chTxt})),
       chart(s),
+      ...(task?[el("div",{class:"daily-task"},el("b",{text:"今日指定造物："+task.item}),el("span",{text:task.description}))]:[]),
       ...(isDev&&odds?[el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率 🔒"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{class:"gi","data-id":id,style:`width:${upPct(id)}%`})),el("b",{class:"gp","data-id":id,text:upPct(id)+"%"}))]:[]),
       el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}`}),
       el("div",{class:"acts"},
@@ -222,6 +223,10 @@ function renderMarket(){
 // ---------- 財經新聞 ----------
 // 玩家只看得到：名稱、內容、時間、普發現金。活動對機率的影響只有開發者看得到。
 function newsTime(n){const t=n.at?.toDate?.();return t?t.toLocaleString("zh-TW",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false}):"";}
+const taipeiInputEpoch=v=>{const m=/^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)$/.exec(v||"");return m?Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5])-8*3600000:0;};
+const taipeiTimeLabel=ms=>new Intl.DateTimeFormat("zh-TW",{timeZone:"Asia/Taipei",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(ms));
+const taipeiDate=()=>{const p=Object.fromEntries(new Intl.DateTimeFormat("en-CA",{timeZone:"Asia/Taipei",year:"numeric",month:"2-digit",day:"2-digit"}).formatToParts(new Date()).filter(x=>x.type!=="literal").map(x=>[x.type,x.value]));return `${p.year}-${p.month}-${p.day}`;};
+const marketOpenClient=()=>Number(new Intl.DateTimeFormat("en-US",{timeZone:"Asia/Taipei",hour:"2-digit",hourCycle:"h23"}).format(new Date()))>=9;
 const fxText=e=>Object.entries(e.shift||{}).map(([id,x])=>`${stocks[id]?.name||id} ${x>0?"+":"−"}${Math.round(Math.abs(x)*100)}`).join("、");
 function updateNewsTimes(){document.querySelectorAll(".ntime").forEach(s=>{const left=Number(s.dataset.end)-nowS();s.textContent=left>0?"進行中・剩 "+hmLeft(left):"已結束";});}
 function newsWin(n){
@@ -264,7 +269,8 @@ function buildNewsForm(host){
     dur:el("input",{class:"px-in",id:"ndur",type:"number",inputmode:"decimal",min:"1",value:"1","aria-label":"活動持續時間"}),
     unit:el("select",{class:"px-sel","aria-label":"時間單位"},new Option("分鐘","1"),new Option("小時","60"),new Option("天","1440")),
     cash:el("input",{class:"px-in",id:"ncash",type:"number",inputmode:"decimal",min:"0",step:"0.01",placeholder:"0（不發就留空）","aria-label":"普發現金"}),
-    box:el("div"),eff:{},sig:""};
+    when:el("input",{class:"px-in",id:"nwhen",type:"datetime-local","aria-label":"台北時間預定發布時間"}),
+    box:el("div"),scheduledHost:el("div"),eff:{},sig:""};
   nf.unit.value="60";
   const w=el("section",{class:"win","aria-label":"發布活動"});
   w.append(winBar("🛠 PUBLISH.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
@@ -272,13 +278,23 @@ function buildNewsForm(host){
     el("p",{class:"mu",text:"只有開發者看得到這個表單。活動影響與機率只有你看得到，玩家只會看到名稱、內容、時間與現金。"}),
     el("label",{class:"lbl",for:"ntitle",text:"活動名稱"}),nf.title,
     el("label",{class:"lbl",for:"nbody",text:"活動資料"}),nf.body,
+    el("label",{class:"lbl",for:"nwhen",text:"預定發布時間（台北時間；留空代表立即發布）"}),nf.when,
     el("label",{class:"lbl",for:"ndur",text:"活動持續時間"}),el("div",{class:"unit"},nf.dur,nf.unit),
     el("h2",{class:"h2",text:"活動影響（可個別選擇）"}),
     el("p",{class:"mu",text:"活動期間，把該股票「上漲的基準機率」改成 50+x（漲）或 50−x（跌）；x 是 1～40 的整數。不選＝不影響。"}),
     nf.box,
     el("label",{class:"lbl",for:"ncash",text:"普發現金（每位玩家領一次，活動期間內有效）"}),nf.cash,
-    el("div",{class:"row"},el("button",{class:"px-btn pri",type:"button",text:"發布活動",onclick:publishNews}))));
-  host.append(w);syncEffRows();
+    el("div",{class:"row"},el("button",{class:"px-btn pri",type:"button",text:"發布／排程活動",onclick:publishNews})),
+    el("h2",{class:"h2",text:"待發布新聞"}),nf.scheduledHost));
+  host.append(w);syncEffRows();loadScheduledNews();
+}
+async function loadScheduledNews(){
+  if(!isDev||!user||!nf?.scheduledHost)return;
+  const host=nf.scheduledHost;host.replaceChildren(el("p",{class:"mu",text:"載入預定新聞…"}));
+  try{const r=await fetch(CFG.api+"/news",{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:JSON.stringify({action:"list-scheduled"})}),j=await r.json();if(!r.ok)throw Error(j.error?.message||"載入失敗");
+    host.replaceChildren();if(!j.scheduled.length){host.append(el("p",{class:"mu",text:"沒有預定發布的新聞。"}));return;}
+    const ul=el("ul",{class:"list"});j.scheduled.forEach(n=>ul.append(el("li",{},el("span",{text:taipeiTimeLabel(n.scheduledAt)+"　"+n.title}),el("button",{class:"px-btn sm",type:"button",text:"取消",onclick:async()=>{const z=await act("news",{action:"cancel-scheduled",id:n.id});if(z){say("已取消預定新聞");loadScheduledNews();}}}))));host.append(ul);
+  }catch(e){host.replaceChildren(el("p",{class:"warn",text:"預定新聞載入失敗："+e.message}));}
 }
 function syncEffRows(){
   const ids=Object.keys(stocks).sort(),sig=ids.join(",");
@@ -291,12 +307,12 @@ function syncEffRows(){
   }
 }
 async function publishNews(){
-  const title=nf.title.value.trim(),mins=parseFloat(nf.dur.value)*parseFloat(nf.unit.value),cash=parseFloat(nf.cash.value)||0,effects={};
+  const title=nf.title.value.trim(),mins=parseFloat(nf.dur.value)*parseFloat(nf.unit.value),cash=parseFloat(nf.cash.value)||0,effects={},scheduledAt=nf.when.value?taipeiInputEpoch(nf.when.value):undefined;
   if(!title)return say("請輸入活動名稱");
   if(!(mins>=1))return say("請輸入活動持續時間");
   for(const [id,c] of Object.entries(nf.eff)){const dir=Number(c.sel.value);if(!dir)continue;const x=parseInt(c.num.value);if(!(x>=1&&x<=40))return say("活動影響的 x 要是 1～40 的整數");effects[id]=dir*x;}
-  const r=await act("news",{action:"publish",title,body:nf.body.value,durationMin:mins,effects,cash});
-  if(r){say(`已發布活動「${title}」`);nf.title.value="";nf.body.value="";nf.cash.value="";nf.dur.value="1";nf.unit.value="60";for(const c of Object.values(nf.eff)){c.sel.value="0";c.num.disabled=true;c.num.value="10";}fetchOdds();}
+  const r=await act("news",{action:"publish",title,body:nf.body.value,durationMin:mins,effects,cash,scheduledAt});
+  if(r){say(r.scheduled?`已排定「${title}」於 ${taipeiTimeLabel(r.scheduledAt)} 發布`:`已發布活動「${title}」`);nf.title.value="";nf.body.value="";nf.cash.value="";nf.when.value="";nf.dur.value="1";nf.unit.value="60";for(const c of Object.values(nf.eff)){c.sel.value="0";c.num.disabled=true;c.num.value="10";}fetchOdds();loadScheduledNews();}
 }
 // ---------- 銀行 ----------
 const bk={},sv={};
@@ -414,7 +430,10 @@ function render(){
   if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：可以在造物視窗直接打字輸入造物名稱":!token?"買賣與銀行可以直接玩；連結《無限煉製》帳號才能投入造物":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」":"";
   if(me.jailUntil>Date.now())$("msg").textContent="你目前正在服刑，剩餘 "+prisonLeft(me.jailUntil)+"；服刑期間不能進行遊戲操作。";
   renderStrip();
-  if(view==="trade"){renderCraft();renderMarket();}
+  if(view==="trade"){
+    const open=marketOpenClient();marketOpenPrev=open;$("shutter").hidden=open;$("craft").hidden=!open;$("market").hidden=!open;$("feed").closest(".win").hidden=!open;
+    if(open){renderCraft();renderMarket();}
+  }
   else if(view==="rank")renderRank();
   else if(view==="black")renderBlackmarket();
   else if(view==="analyst")renderAnalyst();
@@ -480,7 +499,7 @@ function wireNav(){
   $("menu").onclick=()=>dr.showModal();$("dclose").onclick=()=>dr.close();
   dr.addEventListener("click",e=>{if(e.target===dr)dr.close();});
   dr.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>{dr.close();setView(b.dataset.v);});
-  setInterval(()=>{refreshGauges();if(isDev&&++oddsTick%4===0)fetchOdds();if(view==="news")updateNewsTimes();checkMob();if(me.jailUntil&&me.jailUntil<=Date.now()){me.jailUntil=0;render();}if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
+  setInterval(()=>{refreshGauges();if(isDev&&++oddsTick%4===0)fetchOdds();if(view==="news")updateNewsTimes();checkMob();if(me.jailUntil&&me.jailUntil<=Date.now()){me.jailUntil=0;render();}const open=marketOpenClient();if(view==="trade"&&marketOpenPrev!==open){marketOpenPrev=open;render();}if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
 }
 function renderFeed(rows){
   const f=$("feed");f.replaceChildren();
@@ -503,7 +522,7 @@ function wireSettings(){
 
 // ---------- 啟動 ----------
 async function main(){
-  applyScale();wireSettings();wireNav();
+  applyScale();wireSettings();wireNav();marketOpenPrev=marketOpenClient();
   setView({"#news":"news","#rank":"rank","#black":"black","#analyst":"analyst","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
   if([CFG.firebase.apiKey,CFG.ia.clientId,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase、Client ID 與 Worker 網址");return;}
   const app=initializeApp(CFG.firebase);db=getFirestore(app);
@@ -518,7 +537,7 @@ async function main(){
   await handleCallback();
   onSnapshot(doc(db,"market","state"),snap=>{
     if(!snap.exists()){fetch(CFG.api+"/ensure-market",{method:"POST"}).catch(()=>{});return;}
-    stocks=snap.data().stocks||{};render();});
+    stocks=snap.data().stocks||{};dailyTasks=snap.data().dailyTasks||{date:"",tasks:{}};render();});
   onSnapshot(query(collection(db,"news"),orderBy("at","desc"),limit(30)),snap=>{newsList=[];snap.forEach(d=>newsList.push({id:d.id,...d.data()}));newsErr=false;render();},()=>{newsErr=true;render();});
   onSnapshot(query(collection(db,"feed"),orderBy("at","desc"),limit(15)),snap=>{const rows=[];snap.forEach(d=>rows.push(d.data()));renderFeed(rows);});
   if(token)loadIA().then(render).catch(e=>say(e.message));

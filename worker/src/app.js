@@ -18,7 +18,11 @@ async function ensureBind(d,uid,iaId){
   await d.db.commit([{path:`links/${uid}`,data:{iaId},ts:["at"],pre:null},{path:`iaLinks/${iaId}`,data:{uid},ts:["at"],pre:b?b.version:null}]);
 }
 const PRIV="secret/odds";   // 私密文件：玩家的機率偏移 + 財經活動影響。Firestore 規則不開放任何客戶端讀取，只有 Worker（服務帳戶）讀得到
+const NEWS_QUEUE="secret/newsSchedule",TAIPEI="Asia/Taipei";
 const seed=now=>Object.fromEntries(SEED.map(([id,name,emoji,base])=>[id,{name,emoji,base,price:base,last:"",t:[now],p:[base]}]));
+const taipeiParts=now=>Object.fromEntries(new Intl.DateTimeFormat("en-CA",{timeZone:TAIPEI,year:"numeric",month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).formatToParts(new Date(now)).filter(x=>x.type!=="literal").map(x=>[x.type,x.value]));
+const taipeiDay=now=>{const p=taipeiParts(now);return `${p.year}-${p.month}-${p.day}`;};
+const marketOpen=now=>{const p=taipeiParts(now),h=Number(p.hour);return h>=9&&h<24;};
 async function ensureMarket(d){
   if(!(await d.db.get(MP))){
     try{await d.db.commit([{path:MP,data:{stocks:seed(d.now())},ts:["updatedAt"],pre:null},{path:PRIV,data:{bias:{},events:[]},pre:null}]);}
@@ -39,6 +43,7 @@ async function loadOdds(d){
 // 排程：每 2 分鐘讓每檔股票隨機走一步（機率只讀私密文件，公開行情只寫價格與走勢）
 export async function tick(d){
   if(!(await d.db.get(MP)))return ensureMarket(d);
+  if(!marketOpen(d.now()))return {ok:true,closed:true};
   return retry(async()=>{
     const [m,o]=await Promise.all([d.db.get(MP),loadOdds(d)]),now=d.now(),stocks={},ev=L.activeEvents(o.data.events,now);
     for(const [id,s] of Object.entries(m.data.stocks))stocks[id]=L.step(s,d.rand(),d.rand(),now,L.effOdds(o.data.bias?.[id],now),L.eventShift(ev,id,now));
@@ -47,6 +52,30 @@ export async function tick(d){
     await d.db.commit(ops);
     return {ok:true};
   });
+}
+// 每個台北日 08:00 起，每次排程只呼叫一次 Gemini，逐檔產生每日造物題目。
+export async function generateDailyTask(d){
+  if(!d.dailyTask)return {ok:true,skipped:true};
+  const now=d.now(),parts=taipeiParts(now);
+  if(parts.hour!=="08")return {ok:true,skipped:true};
+  const date=taipeiDay(now),m=await d.db.get(MP);if(!m)return {ok:false};
+  const tasks=m.data.dailyTasks?.date===date?{...m.data.dailyTasks.tasks}:{};
+  const id=Object.keys(m.data.stocks).sort().find(k=>!tasks[k]);if(!id)return {ok:true,complete:true};
+  const lockPath="secret/dailyTaskLock",oldLock=await d.db.get(lockPath);if((oldLock?.data.until||0)>now)return {ok:true,busy:true};
+  const lockToken=crypto.randomUUID();
+  try{await d.db.commit([{path:lockPath,data:{date,stockId:id,token:lockToken,until:now+300000},pre:oldLock?oldLock.version:null}]);}
+  catch(e){if(e instanceof HttpError&&e.code==="conflict")return {ok:true,busy:true};throw e;}
+  try{
+    const task=await d.dailyTask(m.data.stocks[id].name,date);
+    return await retry(async()=>{
+      const current=await d.db.get(MP),today=current.data.dailyTasks?.date===date?{...current.data.dailyTasks.tasks}:{};
+      if(today[id])return {ok:true,duplicate:true};
+      await d.db.commit([{path:MP,data:{dailyTasks:{date,tasks:{...today,[id]:task}}},pre:current.version}]);
+      return {ok:true,stockId:id};
+    });
+  }finally{
+    try{const lock=await d.db.get(lockPath);if(lock?.data.token===lockToken)await d.db.commit([{path:lockPath,data:{until:0},pre:lock.version}]);}catch{}
+  }
 }
 
 const STRIKE_MSG="欠款太多又拖過一天，黑道找上門了！資產已重製，並被關押 24 小時。";
@@ -64,7 +93,7 @@ async function strikeIfDue(d,pid,p){
   throw new HttpError(409,"mob",STRIKE_MSG);
 }
 // 開發者：以 Google 驗證過的信箱比對（名單在機密 DEV_EMAILS），可免 IA、自行輸入造物
-const isDev=(d,a)=>a.emailVerified===true&&!!a.email&&(d.devEmails||[]).includes(a.email);
+const isDev=(d,a)=>a.emailVerified===true&&typeof a.email==="string"&&(d.devEmails||[]).includes(a.email.toLowerCase());
 async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
   if(typeof itemName==="string")itemName=itemName.trim();
   if(!/^[a-z]{2,20}$/.test(stockId||"")||typeof itemName!=="string"||!itemName||itemName.length>60||/[\u0000-\u001f]/.test(itemName))throw bad("參數錯誤");
@@ -83,7 +112,9 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
   if(cool(p0))throw new HttpError(429,"resource-exhausted","投入太頻繁，請稍候幾秒");
   if(!dev&&L.usedBefore(p0?.data.used,itemName))throw new HttpError(409,"failed-precondition","這個造物你已經投入過了（同一個造物只能投入一次，不能重複）");
   if(!dev&&!L.recent(await d.ia.history(iaToken),d.now()).has(itemName))throw new HttpError(403,"permission-denied","只能投入 24 小時內做出的造物");
-  const j=await d.judge(s0.name,itemName,geminiKey);
+  const daily=m0?.data.dailyTasks,task=daily?.date===taipeiDay(d.now())?daily.tasks?.[stockId]:null;
+  const theme=task?`${s0.name}；今日指定造物：${task.item}（${task.description}）`:s0.name;
+  const j=await d.judge(theme,itemName,geminiKey);
   return retry(async()=>{
     const [p,m,o]=await Promise.all([d.db.get(pid),d.db.get(MP),loadOdds(d)]);
     await strikeIfDue(d,pid,p);
@@ -147,7 +178,7 @@ async function bank(d,a,{action,amount,all,at}={}){
 }
 // ---- 財經新聞：開發者發布活動（名稱、資料、持續時間、各股票上漲基準機率 ±x、普發現金）；玩家在活動期間領一次現金
 const NEWS_ID=/^[0-9a-f-]{36}$/,noCtl=t=>!/[\u0000-\u0008\u000b-\u001f]/.test(t);    // 活動資料允許換行
-async function newsPublish(d,a,{title,body:text,durationMin,effects,cash}){
+async function newsPublish(d,a,{title,body:text,durationMin,effects,cash,scheduledAt}){
   title=typeof title==="string"?title.trim():"";text=typeof text==="string"?text.trim():"";
   if(!title||title.length>40||!noCtl(title)||/\n/.test(title))throw bad("活動名稱要 1–40 字（不能換行）");
   if(text.length>600||!noCtl(text))throw bad("活動資料最多 600 字");
@@ -160,7 +191,19 @@ async function newsPublish(d,a,{title,body:text,durationMin,effects,cash}){
     if(!/^[a-z]{2,20}$/.test(id)||!Number.isInteger(x)||x===0||Math.abs(x)>L.MAX_SHIFT)throw bad(`活動影響要是 ±1～±${L.MAX_SHIFT} 的整數`);
     eff[id]=x;
   }
+  const now0=d.now(),publishAt=scheduledAt==null||scheduledAt===""?0:Number(scheduledAt);
+  if(publishAt&&(!Number.isSafeInteger(publishAt)||publishAt<=now0||publishAt>now0+30*864e5))throw bad("預定發布時間需在現在之後的 30 天內");
   const id=crypto.randomUUID();
+  const newsData={title,body:text,by:a.name||"開發者",endsAt:(publishAt||now0)+Math.round(mins*60000),durationMin:mins,cash:money};
+  if(publishAt){
+    const m=await d.db.get(MP);if(!m)throw new HttpError(404,"not-found","行情尚未建立");
+    for(const sid of Object.keys(eff))if(!m.data.stocks[sid])throw bad(`找不到股票 ${sid}`);
+    return retry(async()=>{
+      const q=await d.db.get(NEWS_QUEUE),items=q?.data.items||{};
+      await d.db.commit([{path:NEWS_QUEUE,data:{items:{...items,[id]:{...newsData,scheduledAt:publishAt,effects:eff}}},pre:q?q.version:null}]);
+      return {ok:true,id,scheduled:true,scheduledAt:publishAt,endsAt:newsData.endsAt};
+    });
+  }
   return retry(async()=>{
     const [m,o]=await Promise.all([d.db.get(MP),loadOdds(d)]);
     for(const sid of Object.keys(eff))if(!m.data.stocks[sid])throw bad(`找不到股票 ${sid}`);
@@ -172,7 +215,7 @@ async function newsPublish(d,a,{title,body:text,durationMin,effects,cash}){
     // 公開的新聞文件「不含」活動影響（機率只有開發者看得到）；影響只存在私密文件
     await d.db.commit([
       {path:PRIV,data:{events:ev},pre:o.version},
-      {path:`news/${id}`,data:{title,body:text,by:a.name||"開發者",endsAt:until,durationMin:mins,cash:money},ts:["at"],pre:null}]);
+      {path:`news/${id}`,data:{...newsData,endsAt:until},ts:["at"],pre:null}]);
     return {ok:true,id,endsAt:until};
   });
 }
@@ -187,6 +230,36 @@ async function newsEnd(d,{id}){
       {path:PRIV,data:{events:L.activeEvents(o.data.events,now).filter(e=>e.id!==id)},pre:o.version}]);
     return {ok:true};
   });
+}
+async function scheduledNewsList(d){
+  const q=await d.db.get(NEWS_QUEUE);
+  return {scheduled:Object.entries(q?.data.items||{}).map(([id,x])=>({id,title:x.title,scheduledAt:x.scheduledAt,endsAt:x.endsAt})).sort((a,b)=>a.scheduledAt-b.scheduledAt)};
+}
+async function scheduledNewsCancel(d,{id}){
+  if(!NEWS_ID.test(id||""))throw bad("參數錯誤");
+  return retry(async()=>{const q=await d.db.get(NEWS_QUEUE),items={...(q?.data.items||{})};if(!items[id])throw new HttpError(404,"not-found","找不到這則預定新聞");delete items[id];
+    await d.db.commit([{path:NEWS_QUEUE,data:{items},pre:q.version}]);return {ok:true};});
+}
+export async function publishScheduledNews(d){
+  const q=await d.db.get(NEWS_QUEUE),now=d.now(),due=Object.entries(q?.data.items||{}).filter(([,x])=>x.scheduledAt<=now);
+  let published=0;
+  for(const [id] of due){
+    const result=await retry(async()=>{
+      const [queue,m,o]=await Promise.all([d.db.get(NEWS_QUEUE),d.db.get(MP),loadOdds(d)]),items={...(queue?.data.items||{})},item=items[id];
+      if(!item||item.scheduledAt>d.now())return false;
+      const publishedAt=d.now(),endsAt=publishedAt+Math.round(item.durationMin*60000),events=L.activeEvents(o.data.events,publishedAt);
+      if(Object.keys(item.effects||{}).length){if(events.length>=L.MAX_EVENTS)return false;events.push({id,until:endsAt,shift:Object.fromEntries(Object.entries(item.effects).map(([k,x])=>[k,x/100]))});}
+      delete items[id];
+      await d.db.commit([
+        {path:NEWS_QUEUE,data:{items},pre:queue.version},
+        ...(Object.keys(item.effects||{}).length?[{path:PRIV,data:{events},pre:o.version}]:[]),
+        {path:`news/${id}`,data:{title:item.title,body:item.body,by:item.by,endsAt,durationMin:item.durationMin,cash:item.cash},ts:["at"],pre:null}
+      ]);
+      return true;
+    });
+    if(result)published++;
+  }
+  return {ok:true,published};
 }
 async function newsClaim(d,a,{id}){
   if(!NEWS_ID.test(id||""))throw bad("參數錯誤");
@@ -203,6 +276,10 @@ async function newsClaim(d,a,{id}){
 }
 async function news(d,a,body={}){
   if(body.action==="claim")return newsClaim(d,a,body);
+  if(body.action==="list-scheduled"||body.action==="cancel-scheduled"){
+    if(!isDev(d,a))throw new HttpError(403,"permission-denied","只有開發者可以管理預定新聞");
+    return body.action==="list-scheduled"?scheduledNewsList(d):scheduledNewsCancel(d,body);
+  }
   if(body.action!=="publish"&&body.action!=="end")throw bad("參數錯誤");
   if(!isDev(d,a))throw new HttpError(403,"permission-denied","只有開發者可以發布或結束活動");
   return body.action==="publish"?newsPublish(d,a,body):newsEnd(d,body);
@@ -288,6 +365,7 @@ export async function route(req,env,d){
         const o=await loadOdds(d),now=d.now();
         return out(env,200,{now,bias:o.data.bias||{},events:L.activeEvents(o.data.events,now)});
       }
+      if((path==="/trade"||path==="/inject")&&!marketOpen(d.now()))throw new HttpError(409,"market-closed","休市中，交易時間為台北時間 09:00–24:00");
       let body;try{body=await req.json();}catch{throw bad("請求格式錯誤");}
       if(path!=="/leaderboard"&&path!=="/blackmarket")assertFree(await d.db.get(`players/${a.uid}`),d.now());
       return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:path==="/profile"?setPlayerName:path==="/blackmarket"?blackmarket:path==="/analyst"?analyst:trade)(d,a,body));

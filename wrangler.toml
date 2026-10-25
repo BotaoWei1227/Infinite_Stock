@@ -8,13 +8,13 @@ preview_urls = false
 [assets]
 directory = "./public/"
 binding = "ASSETS"
-run_worker_first = ["/inject", "/trade", "/bank", "/news", "/odds", "/whoami", "/ensure-market"]
+run_worker_first = ["/inject", "/trade", "/bank", "/news", "/odds", "/whoami", "/ensure-market", "/profile", "/leaderboard", "/blackmarket", "/analyst"]
 
-# 每 2 分鐘讓行情自己隨機走一步
+# 每分鐘檢查預定新聞與每日造物；行情仍每 2 分鐘更新一次（見 Worker 排程判斷）
 [triggers]
-crons = ["*/2 * * * *"]
+crons = ["* * * * *"]
 
 [vars]
 FIREBASE_PROJECT_ID = "infinite-stock-a7d4d"
-# 機密 DEV_EMAILS（開發者信箱，逗號分隔）也請放在 Secret，不要寫進這個公開檔案
+# 機密 DEV_EMAILS（開發者信箱，逗號分隔）、GEMINI_API_KEY 請放在 Secret，不要寫進這個公開檔案
 # 機密 FIREBASE_SA 不寫在這裡，請在 Cloudflare 網頁「Variables and Secrets」新增為 Secret
