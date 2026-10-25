@@ -15,7 +15,7 @@ export const effBias=(s,now)=>{const b=s.bias||0;if(!b)return 0;const e=b*Math.p
 export const SIM_THRESHOLD=70;
 export const passes=sim=>sim>SIM_THRESHOLD;
 export const nudge=(bias,sim)=>clamp((bias||0)+(passes(sim)?(sim-SIM_THRESHOLD)/(100-SIM_THRESHOLD):-(SIM_THRESHOLD-sim)/SIM_THRESHOLD)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
-export const tradeNudge=(bias,dir)=>clamp((bias||0)+dir*TRADE_NUDGE,-BIAS_CAP,BIAS_CAP);
+export const tradeNudge=(bias,dir,shares=1)=>clamp((bias||0)+dir*TRADE_NUDGE*shares,-BIAS_CAP,BIAS_CAP);
 // 私密機率紀錄 rec＝{v:偏移, at:時間}（存在只有伺服器讀得到的文件）；回傳「現在」衰減後的偏移
 export const effOdds=(rec,now)=>rec?effBias({bias:rec.v,biasAt:rec.at},now):0;
 // 行情走一步：方向隨機（上漲機率 = .5+衰減後的偏移 bias+活動基準偏移 shift），幅度 0.3–1.5%，加微弱均值回歸避免漂離基準價。
@@ -26,11 +26,12 @@ export function step(s,r1,r2,now,bias=0,shift=0,last){
   const price=clamp(rd(s.price*(1+(up?mag:-mag)+pull)),1,s.base*5);
   return {...pub,price,t:[...(s.t||[]),now].slice(-MAXH),p:[...(s.p||[]),price].slice(-MAXH),...(last!==undefined?{last}:{})};
 }
-export function trade(d,id,price,dir){
+export function trade(d,id,price,dir,shares=1){
   const n=d.hold?.[id]||0;
-  if(dir>0&&d.cash<price)throw new Error("現金不足");
-  if(dir<0&&n<1)throw new Error("沒有持股");
-  return {cash:rd(d.cash-dir*price),hold:{...d.hold,[id]:n+dir}};
+  if(!Number.isInteger(shares)||shares<1||shares>100)throw new Error("一次交易限 1、10 或 100 股");
+  if(dir>0&&d.cash<price*shares)throw new Error("現金不足");
+  if(dir<0&&n<shares)throw new Error(`持股不足（需要 ${shares} 股）`);
+  return {cash:rd(d.cash-dir*price*shares),hold:{...d.hold,[id]:n+dir*shares}};
 }
 // 合成紀錄 → Map(造物名 → 最近一次成功合成時間)：24 小時內、非失敗、時間合理
 export function recent(items,now){

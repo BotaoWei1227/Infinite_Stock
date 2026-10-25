@@ -51,6 +51,7 @@ export async function tick(d){
 
 const STRIKE_MSG="欠款太多又拖過一天，黑道找上門了！資產已重製，並被關押 24 小時。";
 const SENTENCE=864e5,PLAYER_ROBBERY_FEE=10000,ROBBERY_FINE=10000,BANK_ROBBERY_FEE=5000,BANK_LOOT=50000;
+const ANALYST_MIN=1000,ANALYST_MAX=10000;
 function assertFree(p,now){if((p?.data.jailUntil||0)>now)throw new HttpError(403,"imprisoned",`你仍在服刑，${new Date(p.data.jailUntil).toISOString()} 後才能行動`);}
 // 黑道：欠款連續超過上限滿 24 小時 → 資產重製，並關押 24 小時
 async function strikeIfDue(d,pid,p){
@@ -103,19 +104,19 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
   });
 }
 // 買賣：只需要 Google 登入，不需要連結 IA
-async function trade(d,a,{stockId,dir}={}){
-  if(!/^[a-z]{2,20}$/.test(stockId||"")||(dir!==1&&dir!==-1))throw bad("參數錯誤");
+async function trade(d,a,{stockId,dir,shares=1}={}){
+  if(!/^[a-z]{2,20}$/.test(stockId||"")||(dir!==1&&dir!==-1)||![1,10,100].includes(shares))throw bad("參數錯誤");
   const pid=`players/${a.uid}`;
   return retry(async()=>{
     const [p,m,o]=await Promise.all([d.db.get(pid),d.db.get(MP),loadOdds(d)]);
     await strikeIfDue(d,pid,p);
     const s=m?.data.stocks?.[stockId];
     if(!s)throw new HttpError(404,"not-found","找不到這檔股票");
-    let r;try{r=L.trade(p?p.data:{cash:START,hold:{}},stockId,s.price,dir);}
+    let r;try{r=L.trade(p?p.data:{cash:START,hold:{}},stockId,s.price,dir,shares);}
     catch(e){throw new HttpError(409,"failed-precondition",e.message);}
     const now=d.now();   // 買進推升、賣出壓低上漲機率（買賣壓力）；不直接改價格，避免買賣套利
     await d.db.commit([
-      {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:L.tradeNudge(L.effOdds(o.data.bias?.[stockId],now),dir),at:now}}},pre:o.version},
+      {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:L.tradeNudge(L.effOdds(o.data.bias?.[stockId],now),dir,shares),at:now}}},pre:o.version},
       {path:pid,data:{...(p?{}:{name:a.name||"玩家"}),cash:r.cash,hold:r.hold},pre:p?p.version:null}]);
     return {ok:true};
   });
@@ -216,6 +217,22 @@ async function leaderboard(d,a){
   const [players,m]=await Promise.all([d.db.list("players"),d.db.get(MP)]),stocks=m?.data.stocks||{},now=d.now();
   return {rows:players.map(({id,data:p})=>({isMe:id===a.uid,name:p.customName||p.name||"玩家",value:Math.round((Number(p.cash||0)+Object.entries(p.hold||{}).reduce((n,[id,q])=>n+Number(q||0)*Number(stocks[id]?.price||0),0)-L.owed(p.loan,now)+L.depositsValue(p,now))*100)/100})).sort((a,b)=>b.value-a.value||a.name.localeCompare(b.name,"zh-Hant")).slice(0,100)};
 }
+async function analyst(d,a,{stockId,amount}={}){
+  const fee=Number(amount);
+  if(!/^[a-z]{2,20}$/.test(stockId||"")||!Number.isInteger(fee)||fee<ANALYST_MIN||fee>ANALYST_MAX)throw bad("請選擇股票並支付 1,000～10,000 元整數費用");
+  const path=`players/${a.uid}`;
+  return retry(async()=>{
+    const [p,m,o]=await Promise.all([d.db.get(path),d.db.get(MP),loadOdds(d)]),now=d.now(),s=m?.data.stocks?.[stockId];
+    if(!s)throw new HttpError(404,"not-found","找不到這檔股票");
+    const data=p?p.data:{cash:START,hold:{},name:a.name||"玩家"};
+    if(Number(data.cash||0)<fee)throw new HttpError(409,"failed-precondition","現金不足，付不起分析費");
+    const actual=L.upProb(L.effOdds(o.data.bias?.[stockId],now)+L.eventShift(L.activeEvents(o.data.events,now),stockId,now))*100;
+    const radius=50-(fee-ANALYST_MIN)*40/(ANALYST_MAX-ANALYST_MIN),rand=d.secureRand?d.secureRand():d.rand();
+    const estimate=Math.min(90,Math.max(10,actual+(rand*2-1)*radius));
+    await d.db.commit([{path,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash:Math.round((Number(data.cash)-fee)*100)/100},pre:p?p.version:null}]);
+    return {ok:true,fee,stock:s.name,estimate:Math.round(estimate*10)/10,radius:Math.round(radius*10)/10,rude:fee<5000};
+  });
+}
 async function blackmarket(d,a,{action,targetUid}={}){
   if(action==="targets"){
     const players=await d.db.list("players");
@@ -257,7 +274,7 @@ export async function route(req,env,d){
   try{
     if(req.method!=="POST")throw new HttpError(405,"invalid-argument","方法不允許");
     if(path==="/ensure-market")return out(env,200,await ensureMarket(d));
-    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"||path==="/profile"||path==="/leaderboard"||path==="/blackmarket"){
+    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"||path==="/profile"||path==="/leaderboard"||path==="/blackmarket"||path==="/analyst"){
       const a=await d.verify(req);
       if(a.provider!=="google.com")throw new HttpError(401,"unauthenticated","請先以 Google 帳號登入");
       if(path==="/whoami")return out(env,200,{dev:isDev(d,a)});
@@ -273,7 +290,7 @@ export async function route(req,env,d){
       }
       let body;try{body=await req.json();}catch{throw bad("請求格式錯誤");}
       if(path!=="/leaderboard"&&path!=="/blackmarket")assertFree(await d.db.get(`players/${a.uid}`),d.now());
-      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:path==="/profile"?setPlayerName:path==="/blackmarket"?blackmarket:trade)(d,a,body));
+      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:path==="/profile"?setPlayerName:path==="/blackmarket"?blackmarket:path==="/analyst"?analyst:trade)(d,a,body));
     }
     throw new HttpError(404,"not-found","找不到");
   }catch(e){

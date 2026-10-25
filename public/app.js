@@ -9,7 +9,7 @@ const fmt=n=>(Math.round(n*100)/100).toFixed(2);
 const prisonLeft=until=>hmLeft(until-Date.now());
 let hinting=true;
 const say=t=>{hinting=false;$("msg").textContent=t;};
-let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="",odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0;
+let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="",odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0,analystReport=null,analystStock="",tradeShares=1;
 
 // ---------- OAuth：Authorization Code + PKCE S256（瀏覽器端） ----------
 const b64u=b=>btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
@@ -95,7 +95,7 @@ async function inject(id){
   const r=await act("inject",{stockId:id,itemName,geminiKey:S.getItem("gk")});
   if(r){item=null;say(`相似度 ${r.score}${REL[r.relation]?"（"+REL[r.relation]+"）":""}：${r.reason}｜${r.pass?`超過門檻 ${r.threshold}，提高`:`沒超過門檻 ${r.threshold}，降低`}${stocks[id]?.name||""}的上漲機率${r.up!=null?`（現在 ${r.up}%・僅開發者可見）`:""}`);render();}
 }
-const trade=async(id,dir)=>{const r=await act("trade",{stockId:id,dir});if(r)say(`已${dir>0?"買入":"賣出"} 1 股${stocks[id]?.name||""}`);};
+const trade=async(id,dir)=>{const shares=tradeShares,r=await act("trade",{stockId:id,dir,shares});if(r)say(`已${dir>0?"買入":"賣出"} ${shares} 股${stocks[id]?.name||""}`);};
 // 上漲機率只有開發者看得到：資料放在伺服器的私密文件，開發者才能用 /odds 取得（一般玩家的瀏覽器裡根本沒有這些資料）
 const DECAY_MS=3e5,DECAY=.9;   // 機率提升每 5 分鐘只剩 90%（須與伺服器 worker/src/logic.js 一致）
 const nowS=()=>Date.now()+skew;
@@ -191,6 +191,9 @@ function renderCraft(){
 }
 function renderMarket(){
   const mk=$("market");mk.replaceChildren();
+  const qty=el("select",{class:"px-sel","aria-label":"每次交易股數"});
+  [[1,"1 股"],[10,"10 股"],[100,"100 股"]].forEach(([n,label])=>qty.append(new Option(label,String(n))));qty.value=String(tradeShares);qty.onchange=()=>{tradeShares=Number(qty.value);renderMarket();};
+  mk.append(el("div",{class:"trade-quantity"},el("label",{class:"lbl",text:"每次買賣股數"}),qty));
   const ids=Object.keys(stocks).sort();
   if(!ids.length){mk.append(el("p",{class:"mu",text:"行情載入中…"}));return;}
   for(const id of ids){
@@ -209,8 +212,8 @@ function renderMarket(){
       ...(isDev&&odds?[el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率 🔒"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{class:"gi","data-id":id,style:`width:${upPct(id)}%`})),el("b",{class:"gp","data-id":id,text:upPct(id)+"%"}))]:[]),
       el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}`}),
       el("div",{class:"acts"},
-        el("button",{class:"px-btn",type:"button",disabled:busy,text:"買 1",onclick:()=>trade(id,1)}),
-        el("button",{class:"px-btn",type:"button",disabled:busy,text:"賣 1",onclick:()=>trade(id,-1)}),
+        el("button",{class:"px-btn",type:"button",disabled:busy,text:`買 ${tradeShares}`,onclick:()=>trade(id,1)}),
+        el("button",{class:"px-btn",type:"button",disabled:busy,text:`賣 ${tradeShares}`,onclick:()=>trade(id,-1)}),
         el("button",{class:"px-btn pri",type:"button",disabled:busy,text:"投入造物",onclick:()=>inject(id)})));
     w.append(b);mk.append(w);
   }
@@ -399,7 +402,7 @@ function renderSet(){
   v.append(w);
 }
 // ---------- 分頁 ----------
-const VIEWS={trade:"v-trade",rank:"v-rank",black:"v-black",news:"v-news",bank:"v-bank",work:"v-work",set:"v-set"},HASH={trade:"",rank:"#rank",black:"#black",news:"#news",bank:"#bank",work:"#work",set:"#settings"};
+const VIEWS={trade:"v-trade",rank:"v-rank",black:"v-black",analyst:"v-analyst",news:"v-news",bank:"v-bank",work:"v-work",set:"v-set"},HASH={trade:"",rank:"#rank",black:"#black",analyst:"#analyst",news:"#news",bank:"#bank",work:"#work",set:"#settings"};
 function setView(v){
   if(!VIEWS[v])v="trade";view=v;
   for(const [k,id] of Object.entries(VIEWS))$(id).hidden=k!==v;
@@ -414,6 +417,7 @@ function render(){
   if(view==="trade"){renderCraft();renderMarket();}
   else if(view==="rank")renderRank();
   else if(view==="black")renderBlackmarket();
+  else if(view==="analyst")renderAnalyst();
   else if(view==="news")renderNews();
   else if(view==="bank")updateBank();
   else if(view==="work")renderWork();
@@ -450,6 +454,27 @@ async function renderBlackmarket(){
     sel.replaceChildren(new Option("▼ 選擇玩家",""));j.targets.forEach(t=>sel.append(new Option(t.name+"（現金 "+fmt(t.cash)+"）",t.uid)));playerBtn.disabled=busy||!sel.value;
   }catch(e){sel.replaceChildren(new Option("玩家名單載入失敗："+e.message,""));}
 }
+function renderAnalyst(){
+  const host=$("analyst");host.replaceChildren();
+  if(!user){host.append(el("p",{class:"mu",text:"登入 Google 帳號後才能委託分析。"}));return;}
+  const ids=Object.keys(stocks).sort(),sel=el("select",{class:"px-sel",id:"analyst-stock","aria-label":"選擇分析股票"});
+  sel.append(new Option(ids.length?"▼ 選擇股票":"行情載入中…",""));
+  ids.forEach(id=>sel.append(new Option(`${stocks[id].emoji} ${stocks[id].name}`,id)));
+  sel.value=stocks[analystStock]?analystStock:"";sel.onchange=()=>{analystStock=sel.value;};
+  const fee=el("input",{class:"px-in",type:"number",inputmode:"numeric",min:"1000",max:"10000",step:"100",value:"1000",id:"analyst-fee","aria-label":"分析師費用"});
+  const ask=el("button",{class:"px-btn pri",type:"button",text:"付費詢問",disabled:busy||!ids.length,onclick:async()=>{
+    const amount=Number(fee.value);if(!sel.value)return say("請先選擇股票");if(!Number.isInteger(amount)||amount<1000||amount>10000)return say("費用需為 1,000～10,000 元整數");
+    const r=await act("analyst",{stockId:sel.value,amount});if(r){analystStock=sel.value;me.cash=Number(me.cash)-r.fee;analystReport=r;renderAnalyst();}
+  }});
+  host.append(el("p",{class:"mu",text:"選股票並支付 1,000～10,000 元，請分析師估計目前上漲機率。最高價位的估計誤差不超過 ±10 個百分點；金額越低越不準。"}),
+    el("label",{class:"lbl",for:"analyst-stock",text:"要分析的股票"}),sel,
+    el("label",{class:"lbl",for:"analyst-fee",text:"分析費用（現金："+fmt(me.cash)+"）"}),fee,el("div",{class:"row"},ask));
+  if(analystReport){
+    const report=analystReport,words=report.rude?"就這點錢也想打聽行情？我隨口報一個，你自己看著辦。":"這是我根據盤面估的，別拿去當保證。";
+    host.append(el("div",{class:"analyst-chat"},el("div",{class:"analyst-avatar",text:"🕵️"}),el("div",{class:"analyst-bubble"},
+      el("b",{text:"股票分析師"}),el("p",{text:words}),el("p",{text:`${report.stock}：我估目前上漲機率約 ${report.estimate}%（誤差約 ±${report.radius} 個百分點）。`} ),el("small",{class:"mu",text:`已收取 ${fmt(report.fee)} 元`}))));
+  }
+}
 function wireNav(){
   const dr=$("drawer");
   $("menu").onclick=()=>dr.showModal();$("dclose").onclick=()=>dr.close();
@@ -479,12 +504,12 @@ function wireSettings(){
 // ---------- 啟動 ----------
 async function main(){
   applyScale();wireSettings();wireNav();
-  setView({"#news":"news","#rank":"rank","#black":"black","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
+  setView({"#news":"news","#rank":"rank","#black":"black","#analyst":"analyst","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
   if([CFG.firebase.apiKey,CFG.ia.clientId,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase、Client ID 與 Worker 網址");return;}
   const app=initializeApp(CFG.firebase);db=getFirestore(app);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
   onAuthStateChanged(auth,u=>{
-    user=u;isDev=false;craftSig="";offP&&offP();offP=null;
+    user=u;isDev=false;craftSig="";analystReport=null;analystStock="";offP&&offP();offP=null;
     if(u)u.getIdToken().then(t=>fetch(CFG.api+"/whoami",{method:"POST",headers:{Authorization:"Bearer "+t}})).then(r=>r.json()).then(j=>{isDev=!!j.dev;craftSig="";render();if(isDev)fetchOdds();}).catch(()=>{});
     if(u)offP=onSnapshot(doc(db,"players",u.uid),snap=>{me=snap.exists()?{...snap.data()}:{cash:CFG.startCash,hold:{},name:u.displayName||"玩家"};render();checkMob();});
     else me={cash:CFG.startCash,hold:{},name:"訪客"};
