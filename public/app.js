@@ -5,6 +5,16 @@ import {getFirestore,collection,doc,onSnapshot,query,orderBy,limit} from "https:
 
 const REDIRECT=location.origin+location.pathname; // 必須與 Developer Center 的 Redirect URI 完全一致
 const $=id=>document.getElementById(id),S=sessionStorage;
+const K=(()=>{   // Google API Key：存在這台裝置的瀏覽器（localStorage），下次不用重打；無痕模式等用不了時退回只存這個分頁
+  let ls=null;try{localStorage.setItem("_t","1");localStorage.removeItem("_t");ls=localStorage;}catch{}
+  try{if(ls){const old=S.getItem("gk");if(old&&!ls.getItem("gk")){ls.setItem("gk",old);S.removeItem("gk");}}}catch{}   // 舊版把 Key 放在分頁裡 → 自動搬到本機
+  return {
+    persistent:!!ls,
+    getItem:k=>(ls&&ls.getItem(k))||S.getItem(k),
+    setItem:(k,v)=>{(ls||S).setItem(k,v);if(ls)S.removeItem(k);},
+    removeItem:k=>{if(ls)ls.removeItem(k);S.removeItem(k);}
+  };
+})();
 const fmt=n=>(Math.round(n*100)/100).toFixed(2);
 const prisonLeft=until=>hmLeft(until-Date.now());
 let hinting=true;
@@ -91,8 +101,8 @@ async function inject(id){
   if(!token&&!isDev)return say("投入造物需要先連結《無限煉製》帳號（買賣與銀行不用）");
   const typed=isDev?devText.trim():"",itemName=typed||item?.name;
   if(!itemName)return say(isDev?"請選擇造物，或在上方輸入造物名稱":"請先選擇要投入的造物");
-  if(!S.getItem("gk")){say("請先到右上角 ⚙ 設定 Google API Key");$("settings").showModal?.();return;}
-  const r=await act("inject",{stockId:id,itemName,geminiKey:S.getItem("gk")});
+  if(!K.getItem("gk")){say("請先到右上角 ⚙ 設定 Google API Key");$("settings").showModal?.();return;}
+  const r=await act("inject",{stockId:id,itemName,geminiKey:K.getItem("gk")});
   if(r){item=null;say(`相似度 ${r.score}${REL[r.relation]?"（"+REL[r.relation]+"）":""}：${r.reason}｜${r.pass?`超過門檻 ${r.threshold}，提高`:`沒超過門檻 ${r.threshold}，降低`}${stocks[id]?.name||""}的上漲機率${r.up!=null?`（現在 ${r.up}%・僅開發者可見）`:""}`);render();}
 }
 const trade=async(id,dir)=>{const shares=tradeShares,r=await act("trade",{stockId:id,dir,shares});if(r){me={...me,cash:r.cash,hold:r.hold};say(`已${dir>0?"買入":"賣出"} ${shares} 股${stocks[id]?.name||""}`);render();}};
@@ -523,13 +533,14 @@ function renderFeed(rows){
       document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：相似度 ${x.score}${x.pass!=null?(x.pass?" ✓":" ✗"):""}${x.pct!=null?"，"+(x.pct>0?"+":"")+x.pct+"%":""}`)));});
 }
 function wireSettings(){
-  const dlg=$("settings"),k=$("gkey"),upd=()=>{$("keystate").textContent=S.getItem("gk")?"✓ 已設定（只存在這個分頁）":"尚未設定";};
-  k.value=S.getItem("gk")||"";$("model").textContent=CFG.modelLabel;upd();
+  const dlg=$("settings"),k=$("gkey"),upd=()=>{$("keystate").textContent=K.getItem("gk")?(K.persistent?"✓ 已設定（存在這台裝置，下次不用重打）":"✓ 已設定（只存在這個分頁；這個瀏覽器不允許長期儲存）"):"尚未設定";};
+  k.value=K.getItem("gk")||"";$("model").textContent=CFG.modelLabel;upd();
+  if(K.persistent)document.querySelectorAll("#settings .mu").forEach(p=>{if(p.textContent.includes("只存在這個分頁"))p.textContent="Key 存在這台裝置的瀏覽器裡（下次不用重打），按「清除 Key」可刪除；每次投入時隨請求送到伺服器轉呼叫 Gemini，伺服器不儲存、不記錄。共用的手機或電腦請記得清除。";});
   $("gear").onclick=()=>dlg.showModal();
   $("close").onclick=()=>dlg.close();
   dlg.addEventListener("click",e=>{if(e.target===dlg)dlg.close();});
-  k.onchange=()=>{S.setItem("gk",k.value.trim());upd();};
-  $("clearkey").onclick=()=>{S.removeItem("gk");k.value="";upd();};
+  k.onchange=()=>{K.setItem("gk",k.value.trim());upd();};
+  $("clearkey").onclick=()=>{K.removeItem("gk");k.value="";upd();};
 }
 
 // ---------- 啟動 ----------
