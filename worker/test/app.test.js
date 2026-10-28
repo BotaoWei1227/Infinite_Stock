@@ -370,3 +370,203 @@ test("舊資料搬家：機率偏移/活動從公開行情搬進私密文件，�
   assert.deepEqual(leaks(A.db.m.get("market/state").data),[]);
   assert.ok(Math.abs(OD(A.db).bias.fire.v-.1)<1e-9);assert.equal(OD(A.db).events[0].id,"e1");assert.equal(MS(A.db).fire.t.length,2);
 });
+
+// ================= 自動財經新聞（台北 10/14/18/22 點） =================
+import {generateAutoNews} from "../src/app.js";
+import {autoNews as aiAutoNews} from "../src/ia.js";
+const TPE=(h,m=0)=>Date.UTC(2027,0,15,h-8,m);   // 台北時間 2027-01-15 h:m
+const newsDocs=db=>[...db.m].filter(([k])=>k.startsWith("news/")).map(([k,v])=>({id:k.slice(5),...v.data}));
+function mkNews(hour,fn){
+  const x=mk();x.t.v=TPE(hour,0);x.calls=0;
+  x.d.autoNews=async(stocks,slot,date)=>{x.calls++;x.last={stocks,slot,date};return fn?fn():{title:"賢者之塔宣布火焰免稅",body:"【賢者之塔連線報導】"+"練金村主人 Funtuan 今日宣布".repeat(6),effects:{fire:30,water:-12}};};
+  return x;
+}
+test("自動新聞：只在 10/14/18/22 點發布，每時段一則，影響寫進私密文件、公開新聞不含影響",async()=>{
+  const x=mkNews(10);await x.call("/ensure-market");
+  const r=await generateAutoNews(x.d);assert.equal(r.published,true);
+  assert.equal((await generateAutoNews(x.d)).skipped,true);assert.equal(x.calls,1);          // 同一時段不重複
+  const n=newsDocs(x.db);assert.equal(n.length,1);assert.equal(n[0].by,"練金村財經快報");assert.equal(n[0].cash,0);
+  assert.ok(!("effects" in n[0])&&!("shift" in n[0]));
+  assert.deepEqual(OD(x.db).events.map(e=>e.shift),[{fire:.3,water:-.12}]);
+  assert.equal(x.last.slot,10);assert.equal(x.last.date,"2027-01-15");
+  x.t.v=TPE(10,59);await generateAutoNews(x.d);assert.equal(x.calls,1);
+  x.t.v=TPE(11,0);await generateAutoNews(x.d);assert.equal(x.calls,1);                         // 非整點時段不發
+  x.t.v=TPE(14,0);assert.equal((await generateAutoNews(x.d)).published,true);
+  x.t.v=TPE(18,5);assert.equal((await generateAutoNews(x.d)).published,true);
+  x.t.v=TPE(22,30);assert.equal((await generateAutoNews(x.d)).published,true);
+  assert.equal(newsDocs(x.db).length,4);
+});
+test("自動新聞：其他時段不呼叫 AI；AI 失敗時可在同時段重試；沒設 Key 則略過",async()=>{
+  const x=mkNews(9);await x.call("/ensure-market");assert.equal((await generateAutoNews(x.d)).skipped,true);assert.equal(x.calls,0);
+  const y=mk();y.t.v=TPE(10);await y.call("/ensure-market");assert.equal((await generateAutoNews(y.d)).skipped,true);   // 沒有 autoNews
+  let fail=true;const z=mkNews(10,()=>{if(fail)throw new Error("Gemini 429");return {title:"標題標題",body:"【練金村連線報導】"+"內文".repeat(40),effects:{}};});
+  await z.call("/ensure-market");await assert.rejects(generateAutoNews(z.d),/429/);
+  z.t.v=TPE(10,0)+30000;const b=await generateAutoNews(z.d);assert.ok(b.skipped||b.busy);assert.equal(z.calls,1);   // 鎖 50 秒內不重打 AI
+  z.t.v=TPE(10,2);fail=false;assert.equal((await generateAutoNews(z.d)).published,true);
+  assert.equal(newsDocs(z.db).length,1);
+});
+test("自動新聞：AI 輸出驗證（股票代號、±30 上限、最多 2 檔、格式錯誤丟棄）",async()=>{
+  const mkF=o=>async()=>({ok:true,json:async()=>({candidates:[{content:{parts:[{text:JSON.stringify(o)}]}}]})});
+  const stocks=[{id:"fire",name:"火"},{id:"water",name:"水"},{id:"earth",name:"土"}],body="【練金村連線報導】"+"內文".repeat(40);
+  const r=await aiAutoNews(mkF({title:"火之稅改革震撼市場",body,effects:{fire:99,water:-45,earth:1,fake:2,wind:0}}),"k".repeat(12),stocks,10,"2027-01-15");
+  assert.deepEqual(r.effects,{fire:30,water:-30});
+  await assert.rejects(aiAutoNews(mkF({title:"短",body,effects:{}}),"k".repeat(12),stocks,10,"d"),/invalid/);
+  await assert.rejects(aiAutoNews(mkF({title:"標題標題標題",body:"太短",effects:{}}),"k".repeat(12),stocks,10,"d"),/invalid/);
+});
+
+// ================= 借貸保釋 =================
+test("保釋：被黑道關押時可借保釋貸款出獄（現金不變、欠款增加、之後可正常行動）；沒在服刑不能保釋",async()=>{
+  const {call,db,t}=mk();await call("/ensure-market");
+  assert.equal((await call("/bank",BK({action:"bail"}))).status,409);                            // 還沒有玩家資料／沒在服刑
+  await call("/bank",BK({action:"borrow",amount:150}));t.v+=25*H;
+  assert.equal((await call("/trade",TR())).body.error.code,"mob");                                 // 黑道上門：現金 50、關押 24 小時
+  assert.equal((await call("/trade",TR())).status,403);                                            // 服刑中不能行動
+  assert.equal((await call("/bank",BK({action:"repay",amount:1}))).status,403);                    // 服刑中其他銀行動作仍被擋
+  const r=await call("/bank",BK({action:"bail"}));assert.equal(r.status,200);assert.equal(r.body.bail,80);assert.equal(r.body.owed,80);
+  assert.deepEqual([P(db).cash,P(db).jailUntil,P(db).loan.p,P(db).bails],[50,0,80,1]);
+  assert.equal((await call("/trade",TR())).status,200);                                            // 出獄後可以玩
+  assert.equal((await call("/bank",BK({action:"bail"}))).status,409);                              // 已經自由，不能再保釋
+});
+test("保釋：貸款疊加在既有欠款上並照利率滾利；欠款過高又拖過一天黑道仍會再來",async()=>{
+  const A=mk();await A.call("/ensure-market");
+  await A.call("/bank",BK({action:"borrow",amount:50}));
+  A.db.m.get("players/g1").data.jailUntil=A.t.v+H;                                                // 模擬被關（例如搶劫失敗）
+  const r=await A.call("/bank",BK({action:"bail"}));assert.equal(r.status,200);assert.ok(Math.abs(r.body.owed-130)<.01);
+  assert.equal(P(A.db).jailUntil,0);
+  A.t.v+=25*H;assert.equal((await A.call("/bank",BK({action:"check"}))).body.error.code,"mob");   // 欠款 >100 並拖過 24 小時
+  assert.ok(P(A.db).jailUntil>A.t.v);
+});
+
+// ================= 練金大富翁（52 格） =================
+import * as B from "../../public/board.js";
+const seed=(db,uid,o={})=>db.m.set(`players/${uid}`,{v:"s"+uid,data:{cash:1000,hold:{},name:uid==="g1"?"Botao":"路人"+uid,...o}});
+const seq=(...xs)=>{let i=0;return()=>xs[Math.min(i++,xs.length-1)];};          // 依序回傳指定亂數
+const dice=(a,b)=>[(a-1)/6+.01,(b-1)/6+.01];                                      // 讓兩顆骰子擲出 a、b
+const MP=db=>db.m.get("monopoly/state").data;
+const MO=async x=>{if(!x.db.m.has("market/state"))await x.call("/ensure-market");return x.call("/monopoly",{action:"roll"});};
+const firstOf=type=>B.BOARD.findIndex(t=>t.type===type);
+test("大富翁：棋盤 52 格，32 塊地產、4 座煉爐，卡片目的地存在",()=>{
+  assert.equal(B.BOARD.length,52);
+  const c={};B.BOARD.forEach(t=>c[t.type]=(c[t.type]||0)+1);
+  assert.deepEqual([c.prop,c.rail,c.chance,c.fate,c.tax,c.start,c.jail,c.park,c.gojail],[32,4,5,5,2,1,1,1,1]);
+  for(const k of [...B.CHANCE_CARDS,...B.FATE_CARDS])if(k.e.k==="goto")assert.ok(k.e.v>=0&&k.e.v<52);
+  assert.equal(B.BOARD[B.JAIL_IDX].type,"jail");
+});
+test("大富翁：擲骰收 100 元、移動並寫進公開棋盤；現金不足與太快都會被擋",async()=>{
+  const x=mk({rand:seq(...dice(2,3))});seed(x.db,"g1");
+  const r=await MO(x);assert.equal(r.status,200);assert.deepEqual([r.body.dice,r.body.from,r.body.to,r.body.cost],[[2,3],0,5,100]);
+  assert.equal(P(x.db).cash,900);assert.equal(MP(x.db).pos.g1.p,5);assert.equal(MP(x.db).pos.g1.n,"Botao");
+  assert.equal((await MO(x)).status,429);                                  // 2 秒內不能連擲
+  x.t.v+=3000;P(x.db).cash=50;x.db.m.get("players/g1").data.cash=50;
+  assert.equal((await MO(x)).status,409);                                  // 現金不足 100
+  assert.equal((await x.call("/monopoly",{action:"dance"})).status,400);
+});
+test("大富翁：買地、不可重複買；租金轉給主人；湊齊同色租金加倍；升級加租",async()=>{
+  const x=mk({rand:seq(...dice(2,2),...dice(2,2),...dice(2,2),...dice(2,2))});seed(x.db,"g1");seed(x.db,"g2");
+  await x.call("/ensure-market");const t=4;assert.equal(B.BOARD[t].type,"prop");assert.equal((await x.call("/monopoly",{action:"buy"})).status,409);   // 站在起點不能買
+  await MO(x);                                                              // g1 → 4
+  const b=await x.call("/monopoly",{action:"buy"});assert.equal(b.status,200);assert.equal(P(x.db).cash,1000-100-B.BOARD[t].price);
+  assert.deepEqual(MP(x.db).owners[t],{u:"g1",n:"Botao",lv:0});
+  x.state.uid="g2";x.state.name="路人";x.t.v+=3000;
+  assert.equal((await x.call("/monopoly",{action:"buy"})).status,409);       // g2 還在起點
+  const r=await MO(x);assert.equal(r.body.to,t);assert.equal(r.body.paidTo,"Botao");   // g2 落在 g1 的地上
+  const rent=B.BOARD[t].rent;
+  assert.equal(x.db.m.get("players/g2").data.cash,1000-100-rent);
+  assert.equal(P(x.db).cash,1000-100-B.BOARD[t].price+rent);
+  assert.equal((await x.call("/monopoly",{action:"buy"})).status,409);       // 已被買走
+  x.state.uid="g1";
+  const up=await x.call("/monopoly",{action:"upgrade",tile:t});assert.equal(up.status,200);assert.equal(MP(x.db).owners[t].lv,1);
+  assert.equal(B.rentOf(t,MP(x.db).owners),rent*3);
+  const o2={};for(const i of B.groupTiles(B.BOARD[t].group))o2[i]={u:"g1",lv:0};
+  assert.equal(B.rentOf(t,o2),rent*2);                                       // 湊齊同色 ×2
+  assert.equal((await x.call("/monopoly",{action:"upgrade",tile:0})).status,400);
+  x.state.uid="g2";assert.equal((await x.call("/monopoly",{action:"upgrade",tile:t})).status,409);   // 不是自己的
+});
+test("大富翁：經過起點領 500；稅務所與押送入獄；現金不夠時只付剩下的",async()=>{
+  const x=mk({rand:seq(...dice(5,5),...dice(1,2),...dice(3,3))});seed(x.db,"g1");
+  x.db.m.set("monopoly/state",{v:"m0",data:{owners:{},pos:{g1:{p:48,n:"Botao",at:0}},log:[]}});
+  const r=await MO(x);assert.equal(r.body.to,6);assert.equal(r.body.events[0],"經過起點，領薪水 500 元");assert.equal(P(x.db).cash,1000-100+500);
+  const tax=B.BOARD.findIndex(t=>t.type==="tax");
+  x.db.m.get("monopoly/state").data.pos.g1.p=tax-3;x.t.v+=3000;x.db.m.get("players/g1").data.cash=250;
+  const r2=await MO(x);assert.equal(r2.body.to,tax);assert.equal(P(x.db).cash,150-Math.min(150,B.TAX));
+  const gj=firstOf("gojail");x.db.m.get("monopoly/state").data.pos.g1.p=gj-6;x.t.v+=3000;x.db.m.get("players/g1").data.cash=1000;
+  const r3=await MO(x);assert.equal(r3.body.to,B.JAIL_IDX);assert.equal(P(x.db).cash,1000-100-B.JAIL_FINE);
+  assert.ok(!(P(x.db).jailUntil>0));                                         // 只是移到探監格，不會真的被關 24 小時
+});
+test("大富翁：機會卡（現金、免費擲骰、移動）與免費擲骰不收費",async()=>{
+  const ch=B.BOARD.findIndex(t=>t.type==="chance"),pick=i=>(i+.5)/B.CHANCE_CARDS.length;
+  const iFree=B.CHANCE_CARDS.findIndex(c=>c.e.k==="free"&&c.e.v===2),iCash=B.CHANCE_CARDS.findIndex(c=>c.e.k==="cash"&&c.e.v===300);
+  const x=mk({rand:seq(...dice(1,2),pick(iFree),...dice(1,2),pick(iCash))});seed(x.db,"g1");
+  assert.equal(ch,3);
+  const r=await MO(x);assert.equal(r.body.to,3);assert.equal(r.body.card.kind,"機會");assert.equal(P(x.db).mfree,2);assert.equal(P(x.db).cash,900);
+  x.db.m.get("monopoly/state").data.pos.g1.p=0;x.t.v+=3000;
+  const r2=await MO(x);assert.equal(r2.body.cost,0);assert.equal(r2.body.free,true);assert.equal(P(x.db).cash,900+300);assert.equal(P(x.db).mfree,1);
+});
+test("大富翁：地產算進排行榜；公開棋盤文件不含任何機率資料；服刑中不能擲骰",async()=>{
+  const x=mk({rand:seq(...dice(2,2))});seed(x.db,"g1");
+  await MO(x);await x.call("/monopoly",{action:"buy"});
+  const lb=(await x.call("/leaderboard",{})).body.rows.find(r=>r.isMe);
+  assert.equal(lb.value,1000-100);                                           // 買地不吃虧：現金少了，地產價值補回來
+  assert.ok(!/odds|bias|prob|shift/i.test(JSON.stringify(MP(x.db))));
+  x.db.m.get("players/g1").data.jailUntil=x.t.v+H;x.t.v+=3000;
+  assert.equal((await MO(x)).status,403);
+});
+
+// ================= 玩家交易權狀 =================
+const MA=(x,body)=>x.call("/monopoly",body);
+async function twoPlayers(){
+  const x=mk({rand:seq(...dice(2,2))});seed(x.db,"g1");seed(x.db,"g2");await x.call("/ensure-market");
+  await MO(x);await MA(x,{action:"buy"});                                            // g1 買下第 4 格
+  await MA(x,{action:"upgrade",tile:4});                                             // 升到 1 級
+  return x;
+}
+test("交易：賣家掛牌、買家接受 → 權狀（含等級）易主、現金與地產價值同步轉移",async()=>{
+  const x=await twoPlayers(),price=B.BOARD[4].price;
+  const l=await MA(x,{action:"list",tile:4,price:900});assert.equal(l.status,200);
+  assert.equal((await MA(x,{action:"list",tile:4,price:0})).status,400);
+  assert.equal((await MA(x,{action:"list",tile:5,price:100})).status,409);               // 第 5 格沒人持有
+  const cash1=P(x.db).cash;
+  x.state.uid="g2";x.state.name="路人";
+  assert.equal((await MA(x,{action:"accept",offerId:"nope"})).status,404);
+  const a=await MA(x,{action:"accept",offerId:l.body.offerId});assert.equal(a.status,200);assert.equal(a.body.role,"buyer");
+  assert.deepEqual(MP(x.db).owners[4],{u:"g2",n:"路人g2",lv:1});
+  assert.equal(x.db.m.get("players/g2").data.cash,1000-900);assert.equal(P(x.db).cash,cash1+900);
+  assert.equal(x.db.m.get("players/g2").data.mprop,B.propertyValue(MP(x.db).owners,"g2"));
+  assert.equal(P(x.db).mprop,0);assert.equal(Object.keys(MP(x.db).offers).length,0);
+  assert.equal((await MA(x,{action:"accept",offerId:l.body.offerId})).status,404);       // 同一張不能重複成交
+  assert.ok(price>0);
+});
+test("交易：買家出價、持有人接受；持有人也可拒絕；不能和自己交易；現金不夠不能成交",async()=>{
+  const x=await twoPlayers();
+  x.state.uid="g2";
+  assert.equal((await MA(x,{action:"bid",tile:4,price:2e6})).status,400);
+  const rich=await MA(x,{action:"bid",tile:4,price:5000});assert.equal(rich.status,409);   // 出價就要有錢（1000）
+  const b=await MA(x,{action:"bid",tile:4,price:700});assert.equal(b.status,200);
+  assert.equal((await MA(x,{action:"accept",offerId:b.body.offerId})).status,409);        // 自己的出價自己不能接受
+  x.state.uid="g1";
+  const cash1=P(x.db).cash;
+  const r=await MA(x,{action:"accept",offerId:b.body.offerId});assert.equal(r.status,200);assert.equal(r.body.role,"seller");
+  assert.equal(MP(x.db).owners[4].u,"g2");assert.equal(P(x.db).cash,cash1+700);assert.equal(x.db.m.get("players/g2").data.cash,300);
+  // 拒絕：g1 對 g2 的地出價，g2 取消（拒絕）
+  const b2=await MA(x,{action:"bid",tile:4,price:100});assert.equal(b2.status,200);
+  x.state.uid="g2";assert.equal((await MA(x,{action:"cancel",offerId:b2.body.offerId})).status,200);
+  assert.equal(Object.keys(MP(x.db).offers).length,0);
+  // 現金不夠：g2 掛牌賣 5000，g1 現金不足
+  const l=await MA(x,{action:"list",tile:4,price:5000});x.state.uid="g1";
+  assert.equal((await MA(x,{action:"accept",offerId:l.body.offerId})).status,409);assert.equal(MP(x.db).owners[4].u,"g2");
+});
+test("交易：權狀已易主的舊掛牌作廢；別人不能取消你的掛牌；掛牌過期自動清除；排行榜地產價值跟著走",async()=>{
+  const x=await twoPlayers();
+  const l=await MA(x,{action:"list",tile:4,price:300});
+  const b=await MA(x,{action:"list",tile:4,price:310});                                   // 同一格再掛 → 只留最新一張
+  assert.equal(Object.keys(MP(x.db).offers).length,1);
+  x.state.uid="g2";assert.equal((await MA(x,{action:"cancel",offerId:b.body.offerId})).status,403);
+  // 偷偷換主：直接改棋盤資料模擬已易主
+  x.db.m.get("monopoly/state").data.owners[4].u="g3";
+  assert.equal((await MA(x,{action:"accept",offerId:b.body.offerId})).status,409);
+  assert.equal(Object.keys(MP(x.db).offers).length,0);
+  x.db.m.get("monopoly/state").data.owners[4].u="g1";
+  const l2=await MA(x,{action:"accept",offerId:l.body.offerId});assert.equal(l2.status,404);
+  x.state.uid="g1";const l3=await MA(x,{action:"list",tile:4,price:300});assert.equal(l3.status,200);
+  x.t.v+=49*H;x.state.uid="g2";assert.equal((await MA(x,{action:"accept",offerId:l3.body.offerId})).status,404);   // 超過 48 小時
+});

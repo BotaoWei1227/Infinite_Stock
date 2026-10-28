@@ -1,6 +1,7 @@
 import {CFG} from "./config.js";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {getAuth,onAuthStateChanged,GoogleAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import {createMono} from "./mono.js";
 import {getFirestore,collection,doc,onSnapshot,query,orderBy,limit} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const REDIRECT=location.origin+location.pathname; // 必須與 Developer Center 的 Redirect URI 完全一致
@@ -125,7 +126,7 @@ async function fetchOdds(){
     const j=await r.json();odds=j;skew=j.now-Date.now();render();
   }catch{}
 }
-const DAYMS=864e5,MOB_LIMIT=100;
+const DAYMS=864e5,MOB_LIMIT=100,BAIL=80;
 // 存款（須與伺服器 worker/src/logic.js 一致）：活存日利率 0.4%；定存日利率 1.2%、鎖 3 天，到期自動轉入活存
 const TD_DAYS=3;
 const grow=(r,ms)=>Math.pow(1+r,Math.max(0,ms)/DAYMS);
@@ -147,7 +148,7 @@ let checking=false;
 async function syncGameSettings(){if(!user||Date.now()-settingsSyncedAt<60000)return;settingsSyncedAt=Date.now();try{const r=await fetch(CFG.api+"/whoami",{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken()}});if(!r.ok)return;const j=await r.json(),next={...gameSettings,...j.settings};if(JSON.stringify(next)!==JSON.stringify(gameSettings)){isDev=!!j.dev;gameSettings=next;bankBuilt=false;render();}}catch{}}
 function checkMob(){if(checking||!user||!mobDueClient())return;checking=true;act("bank",{action:"check"}).finally(()=>{checking=false;});}
 const owedNow=()=>{const l=me.loan;return l&&l.p>0?l.p*Math.pow(1+gameSettings.loanRate,Math.max(0,Date.now()-l.t)/DAYMS):0;};
-const net=()=>me.cash+Object.entries(me.hold||{}).reduce((a,[k,n])=>a+n*(stocks[k]?.price||0),0)-owedNow()+depositsNow();
+const net=()=>me.cash+(me.mprop||0)+Object.entries(me.hold||{}).reduce((a,[k,n])=>a+n*(stocks[k]?.price||0),0)-owedNow()+depositsNow();
 const bankAct=async(action,amount,all)=>{const r=await act("bank",{action,amount,all});
   if(r){say(action==="borrow"?`已借入 ${fmt(amount)}，目前欠款 ${fmt(r.owed)}`:(r.owed>0?`已還款，剩餘欠款 ${fmt(r.owed)}`:"已全額還清，沒有欠款了"));}return r;};
 
@@ -347,12 +348,15 @@ function buildBank(){
   bk.b1=el("button",{class:"px-btn pri",type:"button",text:"借款",onclick:()=>{const a=parseFloat(bk.amt.value);if(!(a>0))return say("請輸入金額");bankAct("borrow",a).then(r=>{if(r)bk.amt.value="";});}});
   bk.b2=el("button",{class:"px-btn",type:"button",text:"還款",onclick:()=>{const a=parseFloat(bk.amt.value);if(!(a>0))return say("請輸入金額");bankAct("repay",a).then(r=>{if(r)bk.amt.value="";});}});
   bk.b3=el("button",{class:"px-btn",type:"button",text:"全額還清",onclick:()=>bankAct("repay",0,true)});
+  bk.bail=el("div",{class:"bailbox",hidden:true},
+    el("p",{class:"hot",text:`⛓ 你正在服刑。可以借 ${fmt(BAIL)} 的保釋貸款立刻出獄：這筆錢不會進你的口袋，直接成為欠款（照一般貸款利率滾利，欠款超過 ${MOB_LIMIT} 並拖過 24 小時黑道還是會上門）。`}),
+    el("button",{class:"px-btn pri",type:"button",text:"借貸保釋",onclick:async()=>{if(!confirm(`借 ${fmt(BAIL)} 保釋貸款並出獄？這筆錢會計入欠款。`))return;const r=await act("bank",{action:"bail"});if(r)say(`已保釋出獄，目前欠款 ${fmt(r.owed)}`);}}));
   b.append(
     el("p",{class:"mu",text:`高利貸：利率 ${(gameSettings.loanRate*100).toFixed(2)}%／24 小時（約每小時 ${hr}%，利息持續複利累計），想借多少都行。`}),
     el("div",{class:"grid"},
       el("div",{class:"cell debt"},el("span",{class:"k",text:"目前欠款"}),bk.owed),el("div",{class:"cell"},el("span",{class:"k",text:"現金"}),bk.cash),
       el("div",{class:"cell"},el("span",{class:"k",text:"黑道上門倒數"}),bk.mob),el("div",{class:"cell debt"},el("span",{class:"k",text:"24 小時後欠款"}),bk.next)),
-    el("label",{class:"lbl",for:"bamt",text:"金額"}),bk.amt,el("div",{class:"row"},bk.b1,bk.b2,bk.b3),
+    bk.bail,el("label",{class:"lbl",for:"bamt",text:"金額"}),bk.amt,el("div",{class:"row"},bk.b1,bk.b2,bk.b3),
     el("p",{class:"warn",text:`欠款會從淨值扣掉。欠款超過 ${MOB_LIMIT} 並連續超過 24 小時，黑道就會上門：資產清空，只能重新開始。借來的錢可以拿去買股票，但股價可能跌。`}),bk.times);
   w.append(b);v.append(w);buildSavings(v);bankBuilt=true;
 }
@@ -400,7 +404,7 @@ function updateBank(){
   const ov=overAtClient(),left_=ov==null?0:ov+DAYMS-Date.now();
   bk.mob.textContent=ov==null?`安全（≤${MOB_LIMIT}）`:left_<=0?"⚠ 黑道已在門口":"⚠ "+hmLeft(left_);bk.mob.className=ov==null?"":"hot";
   bk.times.textContent=me.bankrupt>0?`你被黑道找上過 ${me.bankrupt} 次。`:"";
-  bk.b1.disabled=bk.b2.disabled=bk.b3.disabled=busy;bk.b2.disabled=busy||o<.005;bk.b3.disabled=busy||o<.005;
+  bk.bail.hidden=!(me.jailUntil>Date.now());bk.b1.disabled=bk.b2.disabled=bk.b3.disabled=busy;bk.b2.disabled=busy||o<.005;bk.b3.disabled=busy||o<.005;
 }
 // ---------- 練金工坊 ----------
 function renderWork(){
@@ -439,10 +443,19 @@ function renderSet(){
   v.append(w);
 }
 // ---------- 分頁 ----------
-const VIEWS={trade:"v-trade",rank:"v-rank",black:"v-black",analyst:"v-analyst",news:"v-news",bank:"v-bank",work:"v-work",set:"v-set"},HASH={trade:"",rank:"#rank",black:"#black",analyst:"#analyst",news:"#news",bank:"#bank",work:"#work",set:"#settings"};
+const VIEWS={mono:"v-mono",trade:"v-trade",rank:"v-rank",black:"v-black",analyst:"v-analyst",news:"v-news",bank:"v-bank",work:"v-work",set:"v-set"},HASH={mono:"#mono",trade:"",rank:"#rank",black:"#black",analyst:"#analyst",news:"#news",bank:"#bank",work:"#work",set:"#settings"};
+// 大富翁：只在進入大富翁畫面時才訂閱棋盤文件（省 Firestore 讀取額度）
+let offMono=null;const mono=createMono({host:$("v-mono"),el,fmt,say,act,getMe:()=>me,getUser:()=>user,isBusy:()=>busy});
+function monoSub(on){
+  if(!on){offMono&&offMono();offMono=null;return;}
+  if(offMono||!db)return;
+  offMono=onSnapshot(doc(db,"monopoly","state"),snap=>{mono.update(snap.exists()?snap.data():{});if(!monoFocused&&user){monoFocused=true;setTimeout(()=>mono.focusMe(),50);}},()=>say("讀不到大富翁棋盤，請確認 Firestore 規則已開放 monopoly 集合"));
+}
+let monoFocused=false;
 function setView(v){
   if(!VIEWS[v])v="trade";view=v;
   for(const [k,id] of Object.entries(VIEWS))$(id).hidden=k!==v;
+  $("mode").textContent=v==="mono"?"📈":"🎲";$("mode").setAttribute("aria-label",v==="mono"?"回到股市":"切換到大富翁");monoSub(v==="mono");
   document.querySelectorAll(".nav-item").forEach(b=>{if(b.dataset.v===v)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current");});
   try{history.replaceState(null,"",location.pathname+location.search+HASH[v]);}catch{}
   render();window.scrollTo(0,0);
@@ -450,12 +463,13 @@ function setView(v){
 function render(){
   const rule=document.querySelector(".rule");if(rule)rule.textContent=`股價會自己隨機漲跌。AI 會替造物評出與股票主題的相似度（0–100）：超過目前 ${gameSettings.threshold}% 門檻才算相關，會提高上漲機率；低於門檻會提高下跌機率（越接近門檻影響越小），效果會慢慢消退。每個造物只能投入一次，不能重複。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力；每個人的影響都很小，人多才會明顯。`;
   if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：可以在造物視窗直接打字輸入造物名稱":!token?"買賣與銀行可以直接玩；連結《無限煉製》帳號才能投入造物":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」":"";
-  if(me.jailUntil>Date.now())$("msg").textContent="你目前正在服刑，剩餘 "+prisonLeft(me.jailUntil)+"；服刑期間不能進行遊戲操作。";
+  if(me.jailUntil>Date.now())$("msg").textContent="你目前正在服刑，剩餘 "+prisonLeft(me.jailUntil)+"；服刑期間不能進行遊戲操作，但可以到銀行借貸保釋。";
   renderStrip();
   if(view==="trade"){
     const open=marketOpenClient();marketOpenPrev=open;$("shutter").hidden=open;$("craft").hidden=!open;$("market").hidden=!open;$("feed").closest(".win").hidden=!open;
     if(open){renderCraft();renderMarket();}
   }
+  else if(view==="mono")mono.render();
   else if(view==="rank")renderRank();
   else if(view==="black")renderBlackmarket();
   else if(view==="analyst")renderAnalyst();
@@ -537,6 +551,7 @@ function wireSettings(){
   k.value=K.getItem("gk")||"";$("model").textContent=CFG.modelLabel;upd();
   if(K.persistent)document.querySelectorAll("#settings .mu").forEach(p=>{if(p.textContent.includes("只存在這個分頁"))p.textContent="Key 存在這台裝置的瀏覽器裡（下次不用重打），按「清除 Key」可刪除；每次投入時隨請求送到伺服器轉呼叫 Gemini，伺服器不儲存、不記錄。共用的手機或電腦請記得清除。";});
   $("gear").onclick=()=>dlg.showModal();
+  $("mode").onclick=()=>setView(view==="mono"?"trade":"mono");
   $("close").onclick=()=>dlg.close();
   dlg.addEventListener("click",e=>{if(e.target===dlg)dlg.close();});
   k.onchange=()=>{K.setItem("gk",k.value.trim());upd();};
@@ -546,9 +561,9 @@ function wireSettings(){
 // ---------- 啟動 ----------
 async function main(){
   applyScale();wireSettings();wireNav();marketOpenPrev=marketOpenClient();
-  setView({"#news":"news","#rank":"rank","#black":"black","#analyst":"analyst","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
+  setView({"#mono":"mono","#news":"news","#rank":"rank","#black":"black","#analyst":"analyst","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
   if([CFG.firebase.apiKey,CFG.ia.clientId,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase、Client ID 與 Worker 網址");return;}
-  const app=initializeApp(CFG.firebase);db=getFirestore(app);
+  const app=initializeApp(CFG.firebase);db=getFirestore(app);if(view==="mono")monoSub(true);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
   onAuthStateChanged(auth,u=>{
     user=u;isDev=false;craftSig="";analystReport=null;analystStock="";offP&&offP();offP=null;

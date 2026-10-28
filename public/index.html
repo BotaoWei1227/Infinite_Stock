@@ -14,7 +14,7 @@
 <header class="top">
   <button id="menu" class="px-btn gear" type="button" aria-label="選單" aria-haspopup="dialog">☰</button>
   <h1 class="logo px">煉金<span>交易所</span></h1>
-  <button id="gear" class="px-btn gear" type="button" aria-label="Google API Key 設定" aria-haspopup="dialog">⚙</button>
+  <div class="top-r"><button id="mode" class="px-btn gear" type="button" aria-label="切換到大富翁">🎲</button><button id="gear" class="px-btn gear" type="button" aria-label="Google API Key 設定" aria-haspopup="dialog">⚙</button></div>
 </header>
 <main>
   <section id="strip" class="strip" aria-label="帳號與資產"></section>
@@ -35,6 +35,7 @@
   <div id="v-black" class="view" hidden><section class="win"><div class="bar"><span class="tt">🕶 BLACKMARKET.EXE</span></div><div id="blackmarket" class="body"></div></section></div>
   <div id="v-analyst" class="view" hidden><section class="win"><div class="bar"><span class="tt">📊 STOCK ANALYST.EXE</span></div><div id="analyst" class="body"></div></section></div>
   <div id="v-rank" class="view" hidden><section class="win"><div class="bar"><span class="tt">🏆 富士比排行榜</span></div><div id="ranklist" class="body"></div></section></div>
+  <div id="v-mono" class="view" hidden></div>
   <div id="v-bank" class="view" hidden></div>
   <div id="v-work" class="view" hidden></div>
   <div id="v-set" class="view" hidden></div>
@@ -49,6 +50,7 @@
   <div class="bar"><span class="tt">☰ MENU.EXE</span><button id="dclose" class="wb" type="button" aria-label="關閉選單">×</button></div>
   <nav class="body nav" aria-label="主選單">
     <button class="nav-item" type="button" data-v="trade">📈 交易區</button>
+    <button class="nav-item" type="button" data-v="mono">🎲 大富翁</button>
     <button class="nav-item" type="button" data-v="rank">🏆 排行榜</button>
     <button class="nav-item" type="button" data-v="black">🕶 黑市</button>
     <button class="nav-item" type="button" data-v="analyst">📊 股票分析師</button>

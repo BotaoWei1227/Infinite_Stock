@@ -9,5 +9,6 @@ service cloud.firestore {
     match /players/{id} { allow read: if true; allow write: if false; }
     match /feed/{id}    { allow read: if true; allow write: if false; }
     match /news/{id}    { allow read: if true; allow write: if false; }
+    match /monopoly/{id} { allow read: if true; allow write: if false; }
   }
 }

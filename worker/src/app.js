@@ -1,5 +1,6 @@
 import {HttpError} from "./errors.js";
 import * as L from "./logic.js";
+import * as B from "../../public/board.js";
 const START=50,COOLDOWN=8000,MP="market/state";
 const SEED=[["fire","火","🔥",12],["water","水","💧",10],["earth","土","🪨",8],["wind","風","🌪️",9],["steam","蒸氣","♨️",18],["thunder","雷","⚡",15]];
 const bad=m=>new HttpError(400,"invalid-argument",m);
@@ -80,8 +81,160 @@ export async function generateDailyTask(d){
   }
 }
 
+// 自動財經新聞：台北時間 10、14、18、22 點各發一則（開盤中）。每個時段只發一次（記在私密文件），失敗時下一分鐘再試。
+export const AUTO_NEWS_HOURS=[10,14,18,22];
+export async function generateAutoNews(d){
+  if(!d.autoNews)return {ok:true,skipped:true};
+  const now=d.now(),parts=taipeiParts(now),hour=Number(parts.hour);
+  if(!AUTO_NEWS_HOURS.includes(hour))return {ok:true,skipped:true};
+  const slotKey=`${taipeiDay(now)}-${parts.hour}`,path="secret/autoNews",st=await d.db.get(path);
+  if(st?.data.done?.[slotKey]||(st?.data.until||0)>now)return {ok:true,skipped:true};
+  const m=await d.db.get(MP);if(!m)return {ok:false};
+  const token=crypto.randomUUID();
+  try{await d.db.commit([{path,data:{until:now+50000,token},pre:st?st.version:null}]);}   // 鎖 50 秒，避免同時重複呼叫
+  catch(e){if(e instanceof HttpError&&e.code==="conflict")return {ok:true,busy:true};throw e;}
+  const stocks=Object.entries(m.data.stocks).map(([id,s])=>({id,name:s.name}));
+  const n=await d.autoNews(stocks,hour,taipeiDay(now));
+  const r=await newsPublish(d,{name:"練金村財經快報"},{title:n.title,body:n.body,durationMin:240,effects:n.effects,cash:0});
+  await retry(async()=>{
+    const cur=await d.db.get(path),done=Object.fromEntries(Object.entries(cur?.data.done||{}).sort().slice(-8));
+    await d.db.commit([{path,data:{done:{...done,[slotKey]:r.id},until:0},pre:cur.version}]);
+  });
+  return {ok:true,published:true,id:r.id};
+}
+
+// ---- 練金大富翁：50 格一圈，沒有回合制，想擲骰就花 100 元。棋盤資料在 public/board.js（前後端共用）。
+// 公開文件 monopoly/state：{ owners:{格子:{u,n,lv}}, pos:{uid:{p,n,at}}, log:[…] }；玩家的現金與免費擲骰次數在 players/{uid}。
+const MS="monopoly/state",MONO_ACTIONS=["roll","buy","upgrade","list","bid","accept","cancel"],OFFER_TTL=48*36e5,MAX_OFFERS=100,MAX_MY_OFFERS=10,MAX_PRICE=1e6;
+const monoName=(p,a)=>p?.data.customName||p?.data.name||a.name||"玩家";
+const pushLog=(log,who,text,now)=>[...(log||[]),{at:now,who,text}].slice(-B.LOG_MAX);
+async function monopoly(d,a,body={}){
+  if(!MONO_ACTIONS.includes(body.action))throw bad("參數錯誤");
+  const pid=`players/${a.uid}`;
+  for(let attempt=0;;attempt++){   // 全服共用一份棋盤文件，擲骰很頻繁時衝突多一些，多試幾次
+    try{return await monoOnce(d,a,pid,body);}
+    catch(e){if(!(e instanceof HttpError&&e.code==="conflict"&&attempt<6))throw e;}
+  }
+}
+async function monoOnce(d,a,pid,body){
+  const action=body.action,tile=body.tile;
+  const [p,st]=await Promise.all([d.db.get(pid),d.db.get(MS)]),now=d.now();
+  await strikeIfDue(d,pid,p);
+  const pd=p?p.data:{cash:START,hold:{}},cash0=Math.round(Number(pd.cash??START)*100)/100;
+  const S=st?st.data:{owners:{},pos:{},log:[]},owners={...(S.owners||{})},posMap={...(S.pos||{})},who=monoName(p,a);
+  const offers=Object.fromEntries(Object.entries(S.offers||{}).filter(([,o])=>now-o.at<OFFER_TTL));   // 過期（48 小時）的掛牌與出價自動清掉
+  const playerBase=p?{}:{hold:{},name:a.name||"玩家"};
+  const stateOp=data=>({path:MS,data,pre:st?st.version:null});
+  const cur=Number(posMap[a.uid]?.p??0);
+  if(action==="buy"){
+    const t=B.BOARD[cur];
+    if(!t||(t.type!=="prop"&&t.type!=="rail"))throw new HttpError(409,"failed-precondition","這一格不能購買");
+    if(owners[cur])throw new HttpError(409,"failed-precondition","這塊地已經有主人了");
+    if(cash0<t.price)throw new HttpError(409,"failed-precondition",`現金不足，${t.name} 要 ${t.price} 元`);
+    owners[cur]={u:a.uid,n:who,lv:0};
+    await d.db.commit([{path:pid,data:{...playerBase,cash:Math.round((cash0-t.price)*100)/100,mprop:B.propertyValue(owners,a.uid)},pre:p?p.version:null},
+      stateOp({owners,log:pushLog(S.log,who,`買下了「${t.name}」（${t.price} 元）`,now)})]);
+    return {ok:true,bought:cur,name:t.name,price:t.price};
+  }
+  if(action==="upgrade"){
+    const i=Number(tile),t=B.BOARD[i],o=owners[i];
+    if(!Number.isInteger(i)||!t||t.type!=="prop")throw bad("只有一般地產可以升級");
+    if(!o||o.u!==a.uid)throw new HttpError(409,"failed-precondition","這不是你的地產");
+    if((o.lv||0)>=B.MAX_LV)throw new HttpError(409,"failed-precondition","已經是最高等級了");
+    if(cash0<t.up)throw new HttpError(409,"failed-precondition",`現金不足，升級要 ${t.up} 元`);
+    owners[i]={...o,lv:(o.lv||0)+1};
+    await d.db.commit([{path:pid,data:{...playerBase,cash:Math.round((cash0-t.up)*100)/100,mprop:B.propertyValue(owners,a.uid)},pre:p?p.version:null},
+      stateOp({owners,log:pushLog(S.log,who,`把「${t.name}」升到 ${owners[i].lv} 級`,now)})]);
+    return {ok:true,tile:i,lv:owners[i].lv,cost:t.up};
+  }
+  // ---- 玩家之間交易權狀：賣家掛牌（list）、買家出價（bid），對方同意（accept）才成交；現金在成交當下才檢查與轉移
+  if(action==="list"||action==="bid"){
+    const i=Number(tile),t=B.BOARD[i],price=Math.round(Number(body.price)),o=owners[i];
+    if(!Number.isInteger(i)||!t||(t.type!=="prop"&&t.type!=="rail"))throw bad("只有地產與煉爐可以交易");
+    if(!Number.isFinite(price)||price<1||price>MAX_PRICE)throw bad(`價格需為 1～${MAX_PRICE} 的整數`);
+    if(!o)throw new HttpError(409,"failed-precondition","這塊地還沒有人持有，直接買就好");
+    const kind=action==="list"?"sell":"buy";
+    if(kind==="sell"&&o.u!==a.uid)throw new HttpError(409,"failed-precondition","這不是你的地產");
+    if(kind==="buy"){if(o.u===a.uid)throw new HttpError(409,"failed-precondition","這是你自己的地產");if(cash0<price)throw new HttpError(409,"failed-precondition","現金不夠出這個價");}
+    for(const [id,x] of Object.entries(offers))if(x.u===a.uid&&x.tile===i&&x.k===kind)delete offers[id];   // 同一格同一種只留最新一張
+    if(Object.values(offers).filter(x=>x.u===a.uid).length>=MAX_MY_OFFERS)throw new HttpError(409,"failed-precondition",`你同時最多只能有 ${MAX_MY_OFFERS} 張掛牌／出價`);
+    if(Object.keys(offers).length>=MAX_OFFERS)throw new HttpError(409,"failed-precondition","交易市場已滿，晚點再試");
+    const id=crypto.randomUUID().slice(0,8);offers[id]={k:kind,u:a.uid,n:who,tile:i,price,to:kind==="buy"?o.u:null,at:now};
+    await d.db.commit([stateOp({offers,log:pushLog(S.log,who,kind==="sell"?`把「${t.name}」掛牌出售（${price} 元）`:`出價 ${price} 元想買「${t.name}」（持有人：${o.n}）`,now)})]);
+    return {ok:true,offerId:id,kind,tile:i,price};
+  }
+  if(action==="cancel"){
+    const x=offers[body.offerId];if(!x)throw new HttpError(404,"not-found","找不到這張掛牌／出價（可能已成交或過期）");
+    if(x.u!==a.uid&&!(x.k==="buy"&&x.to===a.uid))throw new HttpError(403,"permission-denied","你不能取消別人的掛牌");
+    delete offers[body.offerId];await d.db.commit([stateOp({offers})]);return {ok:true};
+  }
+  if(action==="accept"){
+    const x=offers[body.offerId];if(!x)throw new HttpError(404,"not-found","找不到這張掛牌／出價（可能已成交或過期）");
+    const i=x.tile,t=B.BOARD[i],o=owners[i],seller=x.k==="sell"?x.u:a.uid,buyer=x.k==="sell"?a.uid:x.u;
+    if(seller===buyer||x.u===a.uid)throw new HttpError(409,"failed-precondition","不能和自己交易");
+    if(!o||o.u!==seller){delete offers[body.offerId];await d.db.commit([stateOp({offers})]);throw new HttpError(409,"failed-precondition","這張權狀已經易主，這筆交易作廢");}
+    const otherId=x.u,od=await d.db.get(`players/${otherId}`);
+    if(!od)throw new HttpError(409,"failed-precondition","對方的玩家資料不存在");
+    const buyerCash=Math.round(Number(buyer===a.uid?cash0:od.data.cash||0)*100)/100;
+    if(buyerCash<x.price)throw new HttpError(409,"failed-precondition",buyer===a.uid?`現金不足，要 ${x.price} 元`:`${x.n} 的現金不夠了，這筆出價暫時無法成交`);
+    const buyerName=buyer===a.uid?who:x.n;
+    owners[i]={u:buyer,n:buyerName,lv:o.lv||0};                                       // 等級跟著權狀走
+    for(const [id,y] of Object.entries(offers))if(y.tile===i)delete offers[id];
+    const upd=(uid,cash)=>({cash:Math.round(cash*100)/100,mprop:B.propertyValue(owners,uid)});
+    const meData=a.uid===buyer?upd(a.uid,cash0-x.price):upd(a.uid,cash0+x.price),otherData=a.uid===buyer?upd(otherId,Number(od.data.cash||0)+x.price):upd(otherId,Number(od.data.cash||0)-x.price);
+    await d.db.commit([{path:pid,data:{...playerBase,...meData},pre:p?p.version:null},{path:`players/${otherId}`,data:otherData,pre:od.version},
+      stateOp({owners,offers,log:pushLog(S.log,who,`「${t.name}」以 ${x.price} 元易主：${seller===a.uid?who:x.n} → ${buyerName}`,now)})]);
+    return {ok:true,tile:i,name:t.name,price:x.price,role:buyer===a.uid?"buyer":"seller"};
+  }
+  // ---- 擲骰
+  if(now-(pd.mlast||0)<B.COOLDOWN_MS)throw new HttpError(429,"resource-exhausted","擲骰太快了，等一下再擲");
+  const free=Number(pd.mfree||0)>0,cost=free?0:B.ROLL_COST;
+  if(cash0<cost)throw new HttpError(409,"failed-precondition",`現金不足，擲骰一次要 ${B.ROLL_COST} 元`);
+  const rnd=()=>d.secureRand?d.secureRand():d.rand(),die=()=>1+Math.floor(rnd()*6);
+  let cash=cash0-cost,freeLeft=Number(pd.mfree||0)-(free?1:0),pos=cur,card=null,transfer=null;
+  const events=[],r1=die(),r2=die();
+  const pay=(n,label)=>{const x=Math.min(cash,n);cash-=x;events.push(x<n?`${label} ${n} 元，現金不夠，只付了 ${Math.round(x*100)/100} 元`:`${label} ${n} 元`);return x;};
+  const advance=n=>{const raw=pos+n;if(n>0&&raw>=B.SIZE){cash+=B.START_BONUS;events.push(`經過起點，領薪水 ${B.START_BONUS} 元`);}pos=((raw%B.SIZE)+B.SIZE)%B.SIZE;};
+  const land=depth=>{
+    const t=B.BOARD[pos],o=owners[pos];
+    if(t.type==="prop"||t.type==="rail"){
+      if(!o)events.push(`來到「${t.name}」，無人持有，可以買下（${t.price} 元）`);
+      else if(o.u===a.uid)events.push(`來到自己的「${t.name}」`);
+      else{const rent=B.rentOf(pos,owners),x=Math.min(cash,rent);cash-=x;transfer={uid:o.u,name:o.n,amount:x};
+        events.push(x<rent?`來到「${t.name}」，要付 ${o.n} 過路費 ${rent} 元，現金不夠，只付了 ${Math.round(x*100)/100} 元`:`來到「${t.name}」，付給 ${o.n} 過路費 ${rent} 元`);}
+    }
+    else if(t.type==="tax")pay(B.TAX,"稅務所課稅");
+    else if(t.type==="gojail"){pos=B.JAIL_IDX;pay(B.JAIL_FINE,"被押送入獄，罰款");}
+    else if(t.type==="chance"||t.type==="fate"){
+      if(depth>0)return;
+      const deck=t.type==="chance"?B.CHANCE_CARDS:B.FATE_CARDS,c=deck[Math.floor(rnd()*deck.length)],e=c.e;
+      card={kind:t.type==="chance"?"機會":"命運",text:c.text};events.push(`抽到${card.kind}：${c.text}`);
+      if(e.k==="cash"){if(e.v>=0)cash+=e.v;else pay(-e.v,"損失");}
+      else if(e.k==="free")freeLeft+=e.v;
+      else if(e.k==="jail"){pos=B.JAIL_IDX;pay(B.JAIL_FINE,"押送入獄，罰款");}
+      else if(e.k==="move"){advance(e.v);events.push(`移動到「${B.BOARD[pos].name}」`);land(1);}
+      else if(e.k==="goto"){const from=pos;pos=e.v;if(e.bonus&&(pos<=from)){cash+=B.START_BONUS;events.push(`經過起點，領薪水 ${B.START_BONUS} 元`);}events.push(`移動到「${B.BOARD[pos].name}」`);land(1);}
+    }
+  };
+  const from=pos;advance(r1+r2);
+  land(0);
+  cash=Math.round(cash*100)/100;
+  const ops=[{path:pid,data:{...playerBase,cash,mfree:freeLeft,mlast:now,mrolls:(pd.mrolls||0)+1},pre:p?p.version:null}];
+  let paidTo=null;
+  if(transfer&&transfer.amount>0){
+    const od=await d.db.get(`players/${transfer.uid}`);
+    if(od){const oc=Math.round((Number(od.data.cash||0)+transfer.amount)*100)/100;ops.push({path:`players/${transfer.uid}`,data:{cash:oc},pre:od.version});paidTo=transfer.name;}
+    else{cash=Math.round((cash+transfer.amount)*100)/100;ops[0].data.cash=cash;events.push("（持有人資料不存在，過路費退回）");}
+  }
+  posMap[a.uid]={p:pos,n:who,at:now};
+  const line=`擲出 ${r1}+${r2}，${events.join("；")}`;
+  ops.push(stateOp({pos:posMap,owners,log:pushLog(S.log,who,line,now)}));
+  await d.db.commit(ops);
+  return {ok:true,dice:[r1,r2],from,to:pos,cost,free,events,card,cash,freeLeft,paidTo,canBuy:["prop","rail"].includes(B.BOARD[pos].type)&&!owners[pos]};
+}
+
 const STRIKE_MSG="欠款太多又拖過一天，黑道找上門了！資產已重製，並被關押 24 小時。";
-const SENTENCE=864e5,PLAYER_ROBBERY_FEE=10000,ROBBERY_FINE=10000,BANK_ROBBERY_FEE=5000,BANK_LOOT=50000;
+const SENTENCE=864e5,BAIL=80,PLAYER_ROBBERY_FEE=10000,ROBBERY_FINE=10000,BANK_ROBBERY_FEE=5000,BANK_LOOT=50000;
 const ANALYST_MIN=1000,ANALYST_MAX=10000;
 function assertFree(p,now){if((p?.data.jailUntil||0)>now)throw new HttpError(403,"imprisoned",`你仍在服刑，${new Date(p.data.jailUntil).toISOString()} 後才能行動`);}
 // 黑道：欠款連續超過上限滿 24 小時 → 資產重製，並關押 24 小時
@@ -158,7 +311,7 @@ async function trade(d,a,{stockId,dir,shares=1}={}){
 // 銀行：借款 / 還款 / 全額還清 / 活存存提 / 定存存入與提前解約 / check（只檢查黑道）。都不需要 IA
 const DEP=["dem_in","dem_out","td_in","td_break"];
 async function bank(d,a,{action,amount,all,at}={}){
-  if(!["borrow","repay","check",...DEP].includes(action))throw bad("參數錯誤");
+  if(!["borrow","repay","check","bail",...DEP].includes(action))throw bad("參數錯誤");
   const amt=Math.round(Number(amount)*100)/100,everything=all===true&&(action==="repay"||action==="dem_out");
   if(["borrow","repay","dem_in","dem_out","td_in"].includes(action)&&!everything&&!(Number.isFinite(amt)&&amt>=.01&&amt<=1e6))throw bad("金額不正確（0.01–1,000,000）");
   if(action==="td_break"&&!Number.isFinite(Number(at)))throw bad("參數錯誤");
@@ -167,6 +320,12 @@ async function bank(d,a,{action,amount,all,at}={}){
     const p=await d.db.get(pid),now=d.now();
     await strikeIfDue(d,pid,p);
     if(action==="check")return {ok:true};
+    if(action==="bail"){   // 服刑中可借「保釋貸款」（計入一般貸款，照利率滾利）：立刻出獄，現金不變
+      if(!p||(p.data.jailUntil||0)<=now)throw new HttpError(409,"failed-precondition","你目前沒有在服刑，不需要保釋");
+      const cfgB=settingsOf(await loadOdds(d)),upd=L.borrow(p.data,BAIL,now,cfgB.loanRate);
+      await d.db.commit([{path:pid,data:{loan:upd.loan,jailUntil:0,bails:(p.data.bails||0)+1},pre:p.version}]);
+      return {ok:true,bail:BAIL,jailUntil:0,owed:Math.round(L.owed(upd.loan,now,cfgB.loanRate)*100)/100};
+    }
     const data=p?p.data:{cash:START},cfg=settingsOf(await loadOdds(d));
     let upd;
     try{
@@ -294,8 +453,8 @@ async function setPlayerName(d,a,{name}={}){
   return retry(async()=>{const p=await d.db.get(path);await d.db.commit([{path,data:{...(p?{}:{cash:START,hold:{},name:a.name||"玩家"}),customName:name},pre:p?p.version:null}]);return {ok:true,name};});
 }
 async function leaderboard(d,a){
-  const [players,m,o]=await Promise.all([d.db.list("players"),d.db.get(MP),loadOdds(d)]),stocks=m?.data.stocks||{},now=d.now(),cfg=settingsOf(o);
-  return {rows:players.map(({id,data:p})=>({isMe:id===a.uid,name:p.customName||p.name||"玩家",value:Math.round((Number(p.cash||0)+Object.entries(p.hold||{}).reduce((n,[id,q])=>n+Number(q||0)*Number(stocks[id]?.price||0),0)-L.owed(p.loan,now,cfg.loanRate)+L.depositsValue(p,now,cfg.demRate,cfg.tdRate))*100)/100})).sort((a,b)=>b.value-a.value||a.name.localeCompare(b.name,"zh-Hant")).slice(0,100)};
+  const [players,m,o,ms]=await Promise.all([d.db.list("players"),d.db.get(MP),loadOdds(d),d.db.get(MS)]),stocks=m?.data.stocks||{},now=d.now(),cfg=settingsOf(o),mo=ms?.data.owners||{};
+  return {rows:players.map(({id,data:p})=>({isMe:id===a.uid,name:p.customName||p.name||"玩家",value:Math.round((Number(p.cash||0)+Object.entries(p.hold||{}).reduce((n,[id,q])=>n+Number(q||0)*Number(stocks[id]?.price||0),0)-L.owed(p.loan,now,cfg.loanRate)+L.depositsValue(p,now,cfg.demRate,cfg.tdRate)+B.propertyValue(mo,id))*100)/100})).sort((a,b)=>b.value-a.value||a.name.localeCompare(b.name,"zh-Hant")).slice(0,100)};
 }
 async function developerSettings(d,a,body={}){
   if(!isDev(d,a))throw new HttpError(403,"permission-denied","只有開發者可以調整設定");
@@ -367,7 +526,7 @@ export async function route(req,env,d){
   try{
     if(req.method!=="POST")throw new HttpError(405,"invalid-argument","方法不允許");
     if(path==="/ensure-market")return out(env,200,await ensureMarket(d));
-    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"||path==="/profile"||path==="/leaderboard"||path==="/blackmarket"||path==="/analyst"||path==="/admin-settings"){
+    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"||path==="/profile"||path==="/leaderboard"||path==="/blackmarket"||path==="/analyst"||path==="/admin-settings"||path==="/monopoly"){
       const a=await d.verify(req);
       if(a.provider!=="google.com")throw new HttpError(401,"unauthenticated","請先以 Google 帳號登入");
       if(path==="/whoami"){await ensureMarket(d);const o=await loadOdds(d);return out(env,200,{dev:isDev(d,a),settings:settingsOf(o)});}
@@ -384,8 +543,8 @@ export async function route(req,env,d){
       }
       if((path==="/trade"||path==="/inject")&&!marketOpen(d.now()))throw new HttpError(409,"market-closed","休市中，交易時間為台北時間 09:00–24:00");
       let body;try{body=await req.json();}catch{throw bad("請求格式錯誤");}
-      if(path!=="/leaderboard"&&path!=="/blackmarket")assertFree(await d.db.get(`players/${a.uid}`),d.now());
-      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:path==="/profile"?setPlayerName:path==="/blackmarket"?blackmarket:path==="/analyst"?analyst:trade)(d,a,body));
+      if(path!=="/leaderboard"&&path!=="/blackmarket"&&!(path==="/bank"&&body.action==="bail"))assertFree(await d.db.get(`players/${a.uid}`),d.now());
+      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:path==="/profile"?setPlayerName:path==="/blackmarket"?blackmarket:path==="/analyst"?analyst:path==="/monopoly"?monopoly:trade)(d,a,body));
     }
     throw new HttpError(404,"not-found","找不到");
   }catch(e){
