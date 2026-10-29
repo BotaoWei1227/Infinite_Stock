@@ -5,7 +5,7 @@ const ring=i=>i<=13?[0,i]:i<=26?[i-13,13]:i<=39?[13,13-(i-26)]:[13-(i-39),0];   
 const hue=s=>{let h=0;for(const c of String(s))h=(h*31+c.charCodeAt(0))%360;return h;};
 
 export function createMono({host,el,fmt,say,act,getMe,getUser,isBusy}){
-  let st={owners:{},pos:{},log:[],offers:{}},selected=null,last=null,built=false,scroller,boardEl,panel;
+  let st={owners:{},pos:{},log:[],offers:{}},selected=null,last=null,built=false,scroller,boardEl,panel,below;
   const ZMIN=22,ZMAX=130;let cs=74;
   try{const z=Number(localStorage.getItem("monoZoom"));if(z>=ZMIN&&z<=ZMAX)cs=z;}catch{}
   // 縮放：改變格子邊長（--cs），並保持畫面中心不動；小於 44px 時隱藏文字，只剩圖示與棋子
@@ -25,7 +25,8 @@ export function createMono({host,el,fmt,say,act,getMe,getUser,isBusy}){
     panel=el("section",{class:"win mono-panel","aria-label":"大富翁操作"});
     boardEl=el("div",{class:"mono-board"});
     scroller=el("div",{class:"mono-scroll",tabindex:"0","aria-label":"大富翁棋盤（可左右上下捲動）"},boardEl);
-    host.append(panel,scroller);
+    below=el("section",{class:"win mono-below","aria-label":"交易市場與動態"});
+    host.append(panel,scroller,below);
     scroller.style.setProperty("--cs",cs+"px");scroller.classList.toggle("mini",cs<44);
     // 兩指捏合縮放（手機）；電腦用 Ctrl＋滾輪
     let d0=0,z0=cs;const dist=t=>Math.hypot(t[0].clientX-t[1].clientX,t[0].clientY-t[1].clientY);
@@ -71,17 +72,22 @@ export function createMono({host,el,fmt,say,act,getMe,getUser,isBusy}){
       el("p",{class:"mu",text:"玩家之間可以直接買賣權狀（等級跟著權狀走），價格自己談，不用經過銀行。點棋盤上的地可以掛牌出售或出價購買；掛牌與出價 48 小時後自動失效。"}),
       ...sec("出售中",sellRows,"目前沒有人掛牌"),...(me?[...sec("收到的出價",inBids,"沒有人向你出價"),...sec("我的出價",outBids,"你沒有出價")]:[]));
   }
+  // 棋盤中央只放標題；規則、交易市場、我的地產、最近動態都放在棋盤下方，不受縮放影響，比較好讀
   function centerEl(){
+    return el("div",{class:"mono-center"},el("h2",{class:"px mono-title",text:"練金大富翁"}),el("p",{class:"mu",text:`一圈 ${SIZE} 格・擲骰 ${ROLL_COST} 元`}));
+  }
+  function belowEls(){
     const mine=Object.entries(st.owners).filter(([,o])=>o.u===uid()).map(([i])=>Number(i)).sort((a,b)=>a-b);
     const logs=[...(st.log||[])].reverse().slice(0,14);
-    return el("div",{class:"mono-center"},
-      el("h2",{class:"px mono-title",text:"練金大富翁"}),
-      el("p",{class:"mu",text:`一圈 ${SIZE} 格，沒有回合制：想擲骰就花 ${ROLL_COST} 元，全服玩家同在一張棋盤上。買地收過路費、抽機會與命運卡，經過起點領薪水。`}),
-      marketEl(),
-      el("h3",{class:"h2",text:`我的地產（${mine.length}）`}),
-      mine.length?el("div",{class:"row"},...mine.map(i=>el("button",{type:"button",class:"px-btn",text:`${BOARD[i].name}${st.owners[i].lv?" ★"+st.owners[i].lv:""}`,onclick:()=>{selected=i;render();focus(i);}}))):el("p",{class:"mu",text:"還沒有地產。擲到沒人持有的地就可以買下。"}),
-      el("h3",{class:"h2",text:"最近動態"}),
-      el("ul",{class:"mono-log"},...(logs.length?logs.map(l=>el("li",{text:`${l.who}：${l.text}`})):[el("li",{class:"mu",text:"還沒有人擲過骰子"})])));
+    return [el("div",{class:"bar"},el("span",{class:"tt",text:"📋 MARKET.EXE"})),
+      el("div",{class:"body"},
+        marketEl(),
+        el("h3",{class:"h2",text:`我的地產（${mine.length}）`}),
+        mine.length?el("div",{class:"row"},...mine.map(i=>el("button",{type:"button",class:"px-btn",text:`${BOARD[i].name}${st.owners[i].lv?" ★"+st.owners[i].lv:""}`,onclick:()=>{selected=i;render();focus(i);scroller.scrollIntoView({block:"start",behavior:"smooth"});}}))):el("p",{class:"mu",text:"還沒有地產。擲到沒人持有的地就可以買下。"}),
+        el("h3",{class:"h2",text:"最近動態"}),
+        el("ul",{class:"mono-log"},...(logs.length?logs.map(l=>el("li",{text:`${l.who}：${l.text}`})):[el("li",{class:"mu",text:"還沒有人擲過骰子"})])),
+        el("h3",{class:"h2",text:"遊戲規則"}),
+        el("p",{class:"mu",text:`沒有回合制：想擲骰就花 ${ROLL_COST} 元，全服玩家同在一張棋盤上。買地收過路費、抽機會與命運卡，經過起點領薪水。點棋盤上的格子可以看租金與操作。`}))];
   }
 
   function infoEl(i){
@@ -129,6 +135,7 @@ export function createMono({host,el,fmt,say,act,getMe,getUser,isBusy}){
   function render(){
     if(!built)build();
     panel.replaceChildren(...panelEl());
+    below.replaceChildren(...belowEls());
     const keepL=scroller.scrollLeft,keepT=scroller.scrollTop;
     boardEl.replaceChildren(...BOARD.map((_,i)=>tileEl(i)),centerEl());
     scroller.scrollLeft=keepL;scroller.scrollTop=keepT;

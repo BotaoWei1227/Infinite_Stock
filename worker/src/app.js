@@ -292,7 +292,7 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
 }
 // 買賣：只需要 Google 登入，不需要連結 IA
 async function trade(d,a,{stockId,dir,shares=1}={}){
-  if(!/^[a-z]{2,20}$/.test(stockId||"")||(dir!==1&&dir!==-1)||![1,10,100].includes(shares))throw bad("參數錯誤");
+  if(!/^[a-z]{2,20}$/.test(stockId||"")||(dir!==1&&dir!==-1)||!Number.isInteger(shares)||shares<1||shares>L.MAX_SHARES)throw bad(`股數需為 1～${L.MAX_SHARES} 的整數`);
   const pid=`players/${a.uid}`;
   return retry(async()=>{
     const [p,m,o]=await Promise.all([d.db.get(pid),d.db.get(MP),loadOdds(d)]);

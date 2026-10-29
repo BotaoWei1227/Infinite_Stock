@@ -950,3 +950,21 @@ textarea.px-in {
 .mono-scroll.mini .tok{border-width:1px;}
 .mono-zoom{align-items:center;margin:0;}
 .mono-zoom .px-btn{padding:2px 8px;min-height:36px;font-size:13px;}
+.trade-quantity{display:flex;flex-wrap:wrap;gap:6px;align-items:center;}
+.qty-in{width:110px;}
+.qty-q{min-height:36px;padding:2px 10px;font-size:13px;}
+.mono-below{margin-top:10px;}
+.mono-below .body{display:flex;flex-direction:column;gap:6px;}
+.mono-center{display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;}
+.mono-center .mu{margin:0;}
+
+/* 財經快訊跑馬燈 */
+.ticker{position:sticky;top:0;z-index:30;background:#0b1220;border-bottom:2px solid var(--amber);box-shadow:0 2px 0 var(--sh);padding-top:env(safe-area-inset-top,0px);}
+.ticker[hidden]{display:none;}
+.tk-btn{display:block;width:100%;overflow:hidden;white-space:nowrap;background:none;border:0;border-radius:0;color:var(--amber);font:inherit;font-size:14px;padding:7px 0;cursor:pointer;text-align:left;}
+.tk-track{display:inline-flex;width:max-content;animation:tk linear infinite;}
+.tk-item{flex:none;}
+.tk-btn:hover .tk-track,.tk-btn:focus-visible .tk-track,.tk-btn:active .tk-track{animation-play-state:paused;}
+.tk-btn:focus-visible{outline:2px dashed var(--cyan);outline-offset:-4px;}
+@keyframes tk{from{transform:translateX(0);}to{transform:translateX(-50%);}}
+@media (prefers-reduced-motion:reduce){.tk-track{animation:none;}.tk-btn{overflow-x:auto;}.tk-item[aria-hidden="true"]{display:none;}}

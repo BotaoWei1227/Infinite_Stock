@@ -8,6 +8,7 @@ export const upProb=bias=>clamp(.5+bias,.1,.9);
 //   買賣：每買 1 股 +1 個百分點、每賣 1 股 −1 個百分點（買賣壓力）
 //   所有人加起來最多 ±15 個百分點（上漲機率 35%–65%）
 //   衰減：每過 5 分鐘只剩 90%（高於 50% 的機率往下掉、低於 50% 的往上回升），小於 0.5 個百分點就直接歸零（回到 50%）。按真實時間計算，與排程間隔無關
+export const MAX_SHARES=100000;
 export const INJECT_MAX=.05,BIAS_CAP=.15,TRADE_NUDGE=.01,DECAY=.9,DECAY_MS=5*60*1000;
 export const effBias=(s,now)=>{const b=s.bias||0;if(!b)return 0;const e=b*Math.pow(DECAY,Math.max(0,now-(s.biasAt??now))/DECAY_MS);return Math.abs(e)<.005?0:e;};
 // 相似度（0–100）必須「高過」門檻才算相關：相似度越高於門檻，提高上漲機率越多（100 時為滿額）；
@@ -28,7 +29,7 @@ export function step(s,r1,r2,now,bias=0,shift=0,last){
 }
 export function trade(d,id,price,dir,shares=1){
   const n=d.hold?.[id]||0;
-  if(!Number.isInteger(shares)||shares<1||shares>100)throw new Error("一次交易限 1、10 或 100 股");
+  if(!Number.isInteger(shares)||shares<1||shares>MAX_SHARES)throw new Error(`一次交易股數需為 1～${MAX_SHARES} 的整數`);
   if(dir>0&&d.cash<price*shares)throw new Error("現金不足");
   if(dir<0&&n<shares)throw new Error(`持股不足（需要 ${shares} 股）`);
   return {cash:rd(d.cash-dir*price*shares),hold:{...d.hold,[id]:n+dir*shares}};

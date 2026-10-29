@@ -35,7 +35,11 @@ test("走勢點保留最近 MAXH 個，並可附上說明文字",()=>{
 test("買賣",()=>{
   assert.deepEqual(trade({cash:50,hold:{}},"fire",12,1),{cash:38,hold:{fire:1}});
   assert.throws(()=>trade({cash:5,hold:{}},"fire",12,1),/現金不足/);
-  assert.throws(()=>trade({cash:5,hold:{}},"fire",12,-1),/沒有持股/);
+  assert.throws(()=>trade({cash:5,hold:{}},"fire",12,-1),/持股不足/);
+  assert.deepEqual(trade({cash:1000,hold:{fire:2}},"fire",12,1,37),{cash:556,hold:{fire:39}});          // 自訂股數
+  assert.deepEqual(trade({cash:0,hold:{fire:50}},"fire",12,-1,41),{cash:492,hold:{fire:9}});
+  assert.throws(()=>trade({cash:1e9,hold:{}},"fire",12,1,0),/整數/);assert.throws(()=>trade({cash:1e9,hold:{}},"fire",12,1,2.5),/整數/);
+  assert.throws(()=>trade({cash:1e9,hold:{}},"fire",12,1,100001),/整數/);
 });
 test("24 小時內的成功合成才算",()=>{
   const now=1e13,h=3600e3;

@@ -203,9 +203,13 @@ function renderCraft(){
 }
 function renderMarket(){
   const mk=$("market");mk.replaceChildren();
-  const qty=el("select",{class:"px-sel","aria-label":"每次交易股數"});
-  [[1,"1 股"],[10,"10 股"],[100,"100 股"]].forEach(([n,label])=>qty.append(new Option(label,String(n))));qty.value=String(tradeShares);qty.onchange=()=>{tradeShares=Number(qty.value);renderMarket();};
-  mk.append(el("div",{class:"trade-quantity"},el("label",{class:"lbl",text:"每次買賣股數"}),qty));
+  // 自訂股數：直接輸入 1～100000 的整數，或點快速按鈕。輸入時只更新按鈕文字，不重畫整個市場（避免手機鍵盤收起）
+  const qty=el("input",{class:"px-in qty-in",id:"qty",type:"number",inputmode:"numeric",min:"1",max:"100000",step:"1","aria-label":"每次交易股數",value:String(tradeShares)});
+  const setQty=n=>{tradeShares=n;document.querySelectorAll(".buy-btn").forEach(b=>b.textContent=`買 ${n}`);document.querySelectorAll(".sell-btn").forEach(b=>b.textContent=`賣 ${n}`);};
+  qty.oninput=()=>{const n=Math.floor(Number(qty.value));if(Number.isFinite(n)&&n>=1&&n<=100000)setQty(n);};
+  qty.onblur=()=>{qty.value=String(tradeShares);};
+  mk.append(el("div",{class:"trade-quantity"},el("label",{class:"lbl",for:"qty",text:"每次買賣股數"}),qty,
+    ...[1,10,100,1000].map(n=>el("button",{class:"px-btn qty-q",type:"button",text:String(n),onclick:()=>{qty.value=String(n);setQty(n);}}))));
   const ids=Object.keys(stocks).sort();
   if(!ids.length){mk.append(el("p",{class:"mu",text:"行情載入中…"}));return;}
   for(const id of ids){
@@ -225,8 +229,8 @@ function renderMarket(){
       ...(isDev&&odds?[el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率 🔒"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{class:"gi","data-id":id,style:`width:${upPct(id)}%`})),el("b",{class:"gp","data-id":id,text:upPct(id)+"%"}))]:[]),
       el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}`}),
       el("div",{class:"acts"},
-        el("button",{class:"px-btn",type:"button",disabled:busy,text:`買 ${tradeShares}`,onclick:()=>trade(id,1)}),
-        el("button",{class:"px-btn",type:"button",disabled:busy,text:`賣 ${tradeShares}`,onclick:()=>trade(id,-1)}),
+        el("button",{class:"px-btn buy-btn",type:"button",disabled:busy,text:`買 ${tradeShares}`,onclick:()=>trade(id,1)}),
+        el("button",{class:"px-btn sell-btn",type:"button",disabled:busy,text:`賣 ${tradeShares}`,onclick:()=>trade(id,-1)}),
         el("button",{class:"px-btn pri",type:"button",disabled:busy,text:"投入造物",onclick:()=>inject(id)})));
     w.append(b);mk.append(w);
   }
@@ -234,6 +238,18 @@ function renderMarket(){
 
 // ---------- 財經新聞 ----------
 // 玩家只看得到：名稱、內容、時間、普發現金。活動對機率的影響只有開發者看得到。
+// 跑馬燈：新聞發布後 TICKER_MS 內、活動還沒結束，就在頁面最上方滾動顯示標題；點一下進財經新聞
+const TICKER_MS=3*36e5;let tickSig="";
+function renderTicker(){
+  const t=$("ticker");if(!t)return;
+  const now=nowS(),items=newsList.filter(n=>{const at=n.at?.toMillis?.()??Number(n.at);return Number.isFinite(at)&&at<=now+6e4&&now-at<TICKER_MS&&n.endsAt>now;}).map(n=>n.title).filter(Boolean);
+  const sig=items.join("\u0001");if(sig===tickSig)return;tickSig=sig;
+  t.hidden=!items.length;if(!items.length){t.replaceChildren();return;}
+  const text="📰 快訊　"+items.join("　★　")+"　　　";
+  const track=el("div",{class:"tk-track"},el("span",{class:"tk-item",text}),el("span",{class:"tk-item","aria-hidden":"true",text}));
+  track.style.animationDuration=Math.max(14,[...text].length*.45)+"s";
+  t.replaceChildren(el("button",{type:"button",class:"tk-btn","aria-label":"財經快訊："+items.join("、")+"。點一下看財經新聞",onclick:()=>setView("news")},track));
+}
 function newsTime(n){const t=n.at?.toDate?.();return t?t.toLocaleString("zh-TW",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false}):"";}
 const taipeiInputEpoch=v=>{const m=/^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)$/.exec(v||"");return m?Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5])-8*3600000:0;};
 const taipeiTimeLabel=ms=>new Intl.DateTimeFormat("zh-TW",{timeZone:"Asia/Taipei",month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false}).format(new Date(ms));
@@ -461,6 +477,7 @@ function setView(v){
   render();window.scrollTo(0,0);
 }
 function render(){
+  renderTicker();
   const rule=document.querySelector(".rule");if(rule)rule.textContent=`股價會自己隨機漲跌。AI 會替造物評出與股票主題的相似度（0–100）：超過目前 ${gameSettings.threshold}% 門檻才算相關，會提高上漲機率；低於門檻會提高下跌機率（越接近門檻影響越小），效果會慢慢消退。每個造物只能投入一次，不能重複。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力；每個人的影響都很小，人多才會明顯。`;
   if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：可以在造物視窗直接打字輸入造物名稱":!token?"買賣與銀行可以直接玩；連結《無限煉製》帳號才能投入造物":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」":"";
   if(me.jailUntil>Date.now())$("msg").textContent="你目前正在服刑，剩餘 "+prisonLeft(me.jailUntil)+"；服刑期間不能進行遊戲操作，但可以到銀行借貸保釋。";
@@ -535,7 +552,7 @@ function wireNav(){
   $("menu").onclick=()=>dr.showModal();$("dclose").onclick=()=>dr.close();
   dr.addEventListener("click",e=>{if(e.target===dr)dr.close();});
   dr.querySelectorAll(".nav-item").forEach(b=>b.onclick=()=>{dr.close();setView(b.dataset.v);});
-  setInterval(()=>{refreshGauges();if(isDev&&++oddsTick%4===0)fetchOdds();syncGameSettings();if(view==="news")updateNewsTimes();checkMob();if(me.jailUntil&&me.jailUntil<=Date.now()){me.jailUntil=0;render();}const open=marketOpenClient();if(view==="trade"&&marketOpenPrev!==open){marketOpenPrev=open;render();}if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
+  setInterval(()=>{renderTicker();refreshGauges();if(isDev&&++oddsTick%4===0)fetchOdds();syncGameSettings();if(view==="news")updateNewsTimes();checkMob();if(me.jailUntil&&me.jailUntil<=Date.now()){me.jailUntil=0;render();}const open=marketOpenClient();if(view==="trade"&&marketOpenPrev!==open){marketOpenPrev=open;render();}if(view==="bank"&&document.activeElement!==bk.amt&&document.activeElement!==sv.amt){renderStrip();updateBank();}},5000);
 }
 function renderFeed(rows){
   const f=$("feed");f.replaceChildren();

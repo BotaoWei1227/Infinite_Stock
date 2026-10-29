@@ -570,3 +570,16 @@ test("交易：權狀已易主的舊掛牌作廢；別人不能取消你的掛�
   x.state.uid="g1";const l3=await MA(x,{action:"list",tile:4,price:300});assert.equal(l3.status,200);
   x.t.v+=49*H;x.state.uid="g2";assert.equal((await MA(x,{action:"accept",offerId:l3.body.offerId})).status,404);   // 超過 48 小時
 });
+
+// ================= 自訂買賣股數 =================
+test("買賣：可自訂 1～100000 的整數股數；0、小數、過大、非數字都被拒絕；買賣壓力仍受 ±15 上限",async()=>{
+  const x=mk();await x.call("/ensure-market");seed(x.db,"g1",{cash:1e6});
+  const price=x.db.m.get("market/state").data.stocks.fire.price;
+  const T=(shares,dir=1)=>x.call("/trade",{stockId:"fire",dir,shares});
+  const r=await T(37);assert.equal(r.status,200);assert.equal(r.body.hold.fire,37);assert.equal(r.body.cash,Math.round((1e6-price*37)*100)/100);
+  assert.equal((await T(14,-1)).status,200);assert.equal(P(x.db).hold.fire,23);
+  assert.equal((await T(24,-1)).status,409);                                   // 持股不足
+  for(const bad of [0,-5,2.5,100001,"10",null])assert.equal((await T(bad)).status,400);
+  assert.equal((await T(5000)).status,200);                                    // 大量買進也只會把機率偏移推到上限
+  const bias=x.db.m.get("secret/odds").data.bias.fire.v;assert.ok(bias<=.15+1e-9);
+});
