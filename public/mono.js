@@ -6,6 +6,17 @@ const hue=s=>{let h=0;for(const c of String(s))h=(h*31+c.charCodeAt(0))%360;retu
 
 export function createMono({host,el,fmt,say,act,getMe,getUser,isBusy}){
   let st={owners:{},pos:{},log:[],offers:{}},selected=null,last=null,built=false,scroller,boardEl,panel;
+  const ZMIN=22,ZMAX=130;let cs=74;
+  try{const z=Number(localStorage.getItem("monoZoom"));if(z>=ZMIN&&z<=ZMAX)cs=z;}catch{}
+  // 縮放：改變格子邊長（--cs），並保持畫面中心不動；小於 44px 時隱藏文字，只剩圖示與棋子
+  function setZoom(v,keep=true){
+    v=Math.round(Math.max(ZMIN,Math.min(ZMAX,v)));if(!scroller||v===cs&&keep===true)return;
+    const cx=(scroller.scrollLeft+scroller.clientWidth/2)/(14*cs),cy=(scroller.scrollTop+scroller.clientHeight/2)/(14*cs);
+    cs=v;scroller.style.setProperty("--cs",cs+"px");scroller.classList.toggle("mini",cs<44);
+    scroller.scrollLeft=cx*14*cs-scroller.clientWidth/2;scroller.scrollTop=cy*14*cs-scroller.clientHeight/2;
+    try{localStorage.setItem("monoZoom",String(cs));}catch{}
+  }
+  const fitAll=()=>setZoom(Math.min(scroller.clientWidth,scroller.clientHeight)/14-1);
   const uid=()=>getUser()?.uid;
   const myPos=()=>Number(st.pos[uid()]?.p??0);
 
@@ -15,18 +26,27 @@ export function createMono({host,el,fmt,say,act,getMe,getUser,isBusy}){
     boardEl=el("div",{class:"mono-board"});
     scroller=el("div",{class:"mono-scroll",tabindex:"0","aria-label":"大富翁棋盤（可左右上下捲動）"},boardEl);
     host.append(panel,scroller);
+    scroller.style.setProperty("--cs",cs+"px");scroller.classList.toggle("mini",cs<44);
+    // 兩指捏合縮放（手機）；電腦用 Ctrl＋滾輪
+    let d0=0,z0=cs;const dist=t=>Math.hypot(t[0].clientX-t[1].clientX,t[0].clientY-t[1].clientY);
+    scroller.addEventListener("touchstart",e=>{if(e.touches.length===2){d0=dist(e.touches);z0=cs;}},{passive:true});
+    scroller.addEventListener("touchmove",e=>{if(e.touches.length===2&&d0>0){e.preventDefault();setZoom(z0*dist(e.touches)/d0);}},{passive:false});
+    scroller.addEventListener("touchend",()=>{d0=0;},{passive:true});
+    scroller.addEventListener("wheel",e=>{if(e.ctrlKey){e.preventDefault();setZoom(cs*(e.deltaY<0?1.12:1/1.12));}},{passive:false});
     built=true;
   }
 
   function tileEl(i){
     const t=BOARD[i],o=st.owners[i],[r,c]=ring(i);
-    const toks=Object.entries(st.pos).filter(([,v])=>Number(v.p)===i).map(([u,v])=>el("span",{class:"tok"+(u===uid()?" me":""),title:v.n||"玩家",style:`background:hsl(${hue(u)} 70% 45%)`,text:[...String(v.n||"玩")][0]}));
+    const all={...st.pos};if(uid()&&!all[uid()])all[uid()]={p:0,n:getUser()?.displayName||"我"};   // 還沒擲過骰的人也有棋子，站在起點
+    const toks=Object.entries(all).filter(([,v])=>Number(v.p)===i).map(([u,v])=>el("span",{class:"tok"+(u===uid()?" me":""),title:v.n||"玩家",style:`background:hsl(${hue(u)} 70% 45%)`,text:[...String(v.n||"玩")][0]}));
     const kids=[];
     if(t.type==="prop")kids.push(el("i",{class:"band",style:`background:${t.color}`}));
     kids.push(el("span",{class:"te",text:t.emoji}),el("b",{class:"tn",text:t.name}));
+    if(uid()&&i===myPos())kids.push(el("em",{class:"here-badge",text:"📍 你在這"}));
     if(t.price)kids.push(el("small",{class:"tp",text:o?`${o.n}${t.type==="prop"&&o.lv?" "+"★".repeat(o.lv):""}`:`${t.price}`}));
     if(toks.length)kids.push(el("div",{class:"toks"},...toks));
-    return el("button",{type:"button",class:`tile t-${t.type}${o?" owned":""}${o&&o.u===uid()?" mine":""}${selected===i?" sel":""}`,style:`grid-row:${r+1};grid-column:${c+1}`,"aria-label":`第 ${i} 格 ${t.name}`,onclick:()=>{selected=i;render();}},...kids);
+    return el("button",{type:"button",class:`tile t-${t.type}${i===myPos()&&uid()?" here":""}${o?" owned":""}${o&&o.u===uid()?" mine":""}${selected===i?" sel":""}`,style:`grid-row:${r+1};grid-column:${c+1}`,"aria-label":`第 ${i} 格 ${t.name}`,onclick:()=>{selected=i;render();}},...kids);
   }
 
   const offerList=()=>Object.entries(st.offers||{}).map(([id,o])=>({id,...o})).filter(o=>Date.now()-o.at<48*36e5&&BOARD[o.tile]).sort((a,b)=>b.at-a.at);
@@ -96,6 +116,7 @@ export function createMono({host,el,fmt,say,act,getMe,getUser,isBusy}){
     const res=last?el("div",{class:"mono-result"},el("b",{text:`🎲 ${last.dice[0]} + ${last.dice[1]} = ${last.dice[0]+last.dice[1]}`}),el("ul",{},...last.events.map(e=>el("li",{text:e})))):el("p",{class:"mu",text:user?"按下擲骰開始。你的棋子是棋盤上發亮的那一個。":"請先以 Google 帳號登入，就能加入大富翁。"});
     return [bar,el("div",{class:"body"},
       el("div",{class:"row mono-row"},rollBtn,el("span",{class:"mu",text:`現金 ${fmt(me.cash)}　位置：第 ${p} 格「${BOARD[p].name}」`}),el("button",{type:"button",class:"px-btn",text:"找到我",onclick:()=>focus(p)})),
+      el("div",{class:"row mono-zoom"},el("span",{class:"mu",text:"棋盤大小"}),el("button",{type:"button",class:"px-btn",text:"－ 縮小","aria-label":"縮小棋盤",onclick:()=>setZoom(cs/1.25)}),el("button",{type:"button",class:"px-btn",text:"＋ 放大","aria-label":"放大棋盤",onclick:()=>{setZoom(cs*1.25);}}),el("button",{type:"button",class:"px-btn",text:"全景",onclick:()=>fitAll()}),el("button",{type:"button",class:"px-btn",text:"預設",onclick:()=>{setZoom(74);focus(p);}})),
       res,infoEl(sel))];
   }
 
