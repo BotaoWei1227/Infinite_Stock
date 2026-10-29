@@ -173,19 +173,19 @@ test("開發者判斷：信箱未驗證、不在名單、名單為空、大小�
 
 test("買賣會推動走勢：買進推升、賣出壓低上漲機率；有上限；失敗的交易不影響；不直接改價格",async()=>{
   const {call,db}=mk();await call("/ensure-market");
-  await call("/trade",TR());assert.ok(Math.abs(BIAS(db)-.01)<1e-9);assert.equal(MS(db).fire.price,12);assert.equal(MS(db).fire.p.length,1);
+  await call("/trade",TR());assert.ok(Math.abs(BIAS(db)-.003)<1e-9);assert.equal(MS(db).fire.price,12);assert.equal(MS(db).fire.p.length,1);
   await call("/trade",TR({dir:-1}));assert.ok(Math.abs(BIAS(db))<1e-9);
   assert.equal((await call("/trade",TR({dir:-1}))).status,409);assert.ok(Math.abs(BIAS(db))<1e-9);          // 沒持股賣不出去，不算
-  await call("/trade",TR({stockId:"water"}));assert.ok(Math.abs(BIAS(db,"water")-.01)<1e-9);assert.ok(Math.abs(BIAS(db))<1e-9);   // 只影響該檔
+  await call("/trade",TR({stockId:"water"}));assert.ok(Math.abs(BIAS(db,"water")-.003)<1e-9);assert.ok(Math.abs(BIAS(db))<1e-9);   // 只影響該檔
   await call("/bank",BK({action:"borrow",amount:1000}));
-  for(let i=0;i<20;i++)await call("/trade",TR());assert.equal(BIAS(db),.15);                           // 買再多也只到 65%
+  for(let i=0;i<5;i++)await call("/trade",TR({shares:80}));assert.equal(BIAS(db),.15);                  // 買再多也只到 65%
   // 買賣沒有套利：連續買進再賣出，現金只會因為價格不變而回到原點（沒有憑空賺到的價差）
   const {call:c2,db:d2}=mk();await c2("/ensure-market");const cash0=50;await c2("/trade",TR());await c2("/trade",TR({dir:-1}));assert.equal(d2.m.get("players/g1").data.cash,cash0);
 });
 test("多人同時買賣會疊加但被上限擋住，且彼此不互相覆蓋",async()=>{
   const A=mk(),db=A.db;await A.call("/ensure-market");
   for(const [uid,name] of [["g1","甲"],["g2","乙"],["g3","丙"]]){A.state.uid=uid;A.state.name=name;await A.call("/trade",TR());}
-  assert.ok(Math.abs(BIAS(db)-.03)<1e-9);assert.equal(["g1","g2","g3"].every(u=>db.m.get("players/"+u).data.hold.fire===1),true);
+  assert.ok(Math.abs(BIAS(db)-.009)<1e-9);assert.equal(["g1","g2","g3"].every(u=>db.m.get("players/"+u).data.hold.fire===1),true);
 });
 
 test("門檻：剛好等於 70 不算通過（沒有影響）；71 才通過",async()=>{
@@ -211,7 +211,7 @@ test("投入的機率提升每 5 分鐘降 10%（兩個方向都回到 50%），
   for(let i=0;i<5;i++){a.t.v+=120000;await tick(a.d);}b.t.v+=600000;await tick(b.d);
   assert.ok(Math.abs(EFF(a)-EFF(b))<1e-9);assert.ok(Math.abs(EFF(a)-.05*.81)<1e-9);
   // 買賣疊加在「已衰減」的值上
-  b.t.v+=M;await b.call("/trade",TR());assert.ok(Math.abs(BIAS(b.db)-(.05*.81*.9+.01))<1e-9);
+  b.t.v+=M;await b.call("/trade",TR());assert.ok(Math.abs(BIAS(b.db)-(.05*.81*.9+.003))<1e-9);
 });
 
 test("存款：活存/定存的存入、領出、利息、到期轉換、提前解約；不被其他操作覆蓋",async()=>{
@@ -582,4 +582,45 @@ test("買賣：可自訂 1～100000 的整數股數；0、小數、過大、非�
   for(const bad of [0,-5,2.5,100001,"10",null])assert.equal((await T(bad)).status,400);
   assert.equal((await T(5000)).status,200);                                    // 大量買進也只會把機率偏移推到上限
   const bias=x.db.m.get("secret/odds").data.bias.fire.v;assert.ok(bias<=.15+1e-9);
+});
+
+// ================= 買賣壓力看占全服持股的比例 / 全服持股記帳 =================
+test("買賣壓力：全服 1000 股時賣 900 股重創、買賣 1 股幾乎沒影響；全服持股隨買賣與黑道清空而更新",async()=>{
+  const x=mk();await x.call("/ensure-market");
+  x.db.m.get("secret/odds").data.float={fire:1000};
+  seed(x.db,"g1",{cash:1e6,hold:{fire:900}});seed(x.db,"g2",{cash:1e6,hold:{fire:100}});
+  const T=(shares,dir)=>x.call("/trade",{stockId:"fire",dir,shares});
+  const bias=()=>x.db.m.get("secret/odds").data.bias.fire.v;
+  assert.equal((await T(1,1)).status,200);assert.ok(Math.abs(bias()-.0003)<1e-9);                       // 買 1 股：+0.03 個百分點
+  assert.equal(x.db.m.get("secret/odds").data.float.fire,1001);
+  assert.equal((await T(901,-1)).status,200);assert.equal(bias(),-.15);                                 // 賣 901 股：重創（碰到下限 −15）
+  assert.equal(x.db.m.get("secret/odds").data.float.fire,100);
+  // 黑道清空持股 → 從全服持股扣掉
+  x.state.uid="g2";x.db.m.get("players/g2").data.loan={p:500,t:x.t.v};x.t.v+=25*H;
+  assert.equal((await T(1,1)).body.error.code,"mob");assert.equal(x.db.m.get("secret/odds").data.float.fire,0);
+});
+test("全服持股：第一次沒有紀錄時，掃描玩家持股建立；持股太少時以 100 股當分母",async()=>{
+  const x=mk();await x.call("/ensure-market");seed(x.db,"g1",{cash:1e6,hold:{fire:30}});seed(x.db,"g2",{cash:1e6,hold:{fire:20,water:5}});
+  assert.equal("float" in x.db.m.get("secret/odds").data,false);
+  assert.equal((await x.call("/trade",{stockId:"fire",dir:-1,shares:10})).status,200);
+  assert.deepEqual(x.db.m.get("secret/odds").data.float,{fire:40,water:5});                              // 50 − 10；水不變
+  assert.ok(Math.abs(x.db.m.get("secret/odds").data.bias.fire.v+.3*10/100)<1e-9);                       // 全服只有 50 股 → 以 100 為分母：−3 個百分點
+});
+
+test("買賣壓力：很多小單會疊加（不因單筆小於 0.5 個百分點被當成 0）",async()=>{
+  const x=mk();await x.call("/ensure-market");
+  x.db.m.get("secret/odds").data.float={fire:10000};seed(x.db,"g1",{cash:1e6,hold:{fire:5000}});
+  for(let i=0;i<10;i++)await x.call("/trade",{stockId:"fire",dir:-1,shares:100});                    // 每筆只占 1% → -0.3 個百分點，連賣 10 筆
+  const v=x.db.m.get("secret/odds").data.bias.fire.v;assert.ok(v<-.03&&v>-.032,String(v));   // 賣出時全服持股一直減少，分母變小，所以比 0.03 略多一點
+});
+
+// ================= 搶銀行／搶玩家被捕也能保釋 =================
+test("保釋：搶銀行失敗被捕後可以借貸保釋出獄；保釋後可正常行動",async()=>{
+  const x=mk({rand:()=>.99});await x.call("/ensure-market");seed(x.db,"g1",{cash:50000});
+  const r=await x.call("/blackmarket",{action:"rob-bank"});assert.equal(r.body.caught,true);assert.ok(P(x.db).jailUntil>x.t.v);
+  assert.equal((await x.call("/trade",TR())).status,403);                                    // 服刑中不能行動
+  assert.equal((await x.call("/blackmarket",{action:"rob-bank"})).status,403);
+  const b=await x.call("/bank",{action:"bail"});assert.equal(b.status,200);assert.equal(b.body.bail,80);
+  assert.equal(P(x.db).jailUntil,0);assert.equal(P(x.db).cash,50000-5000-10000);              // 罰金照扣，保釋金不進口袋
+  assert.equal((await x.call("/trade",TR())).status,200);
 });

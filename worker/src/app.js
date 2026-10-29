@@ -43,7 +43,7 @@ async function loadOdds(d){
   catch(e){if(!(e instanceof HttpError&&e.code==="conflict"))throw e;}
   return d.db.get(PRIV);
 }
-// 排程：每 2 分鐘讓每檔股票隨機走一步（機率只讀私密文件，公開行情只寫價格與走勢）
+// 排程：每 1 分鐘讓每檔股票隨機走一步（機率只讀私密文件，公開行情只寫價格與走勢）
 export async function tick(d){
   if(!(await d.db.get(MP)))return ensureMarket(d);
   if(!marketOpen(d.now()))return {ok:true,closed:true};
@@ -240,10 +240,12 @@ function assertFree(p,now){if((p?.data.jailUntil||0)>now)throw new HttpError(403
 // 黑道：欠款連續超過上限滿 24 小時 → 資產重製，並關押 24 小時
 async function strikeIfDue(d,pid,p){
   const now=d.now();
-  const cfg=settingsOf(await loadOdds(d));
+  const o=await loadOdds(d),cfg=settingsOf(o);
   if(!p||!L.mobDue(p.data.loan,now,cfg.loanRate))return;
   const owed=Math.round(L.owed(p.data.loan,now,cfg.loanRate)*100)/100;
-  await d.db.commit([
+  const wiped=p.data.hold||{},fl=o.data.float,flOps=[];
+  if(fl&&Object.values(wiped).some(q=>Number(q)>0)){const nf={...fl};for(const [k,q] of Object.entries(wiped))nf[k]=Math.max(0,Number(nf[k]||0)-Number(q||0));flOps.push({path:PRIV,data:{float:nf},pre:o.version});}   // 被黑道清空的持股也要從全服持股扣掉
+  await d.db.commit([...flOps,
     {path:pid,data:{cash:START,hold:{},loan:{p:0,t:now},dem:{a:0,t:now},tds:[],bankrupt:(p.data.bankrupt||0)+1,jailUntil:now+SENTENCE},pre:p.version},
     {path:`feed/${crypto.randomUUID()}`,data:{who:p.data.customName||p.data.name||"玩家",mob:true,owed},ts:["at"],pre:null}]);
   throw new HttpError(409,"mob",STRIKE_MSG);
@@ -290,6 +292,12 @@ async function inject(d,a,{stockId,itemName,iaToken,geminiKey}={}){
     return {...j,price:s.price,pass:L.passes(j.score,cfg.threshold),threshold:cfg.threshold,...(dev?{up}:{})};
   });
 }
+// 全服持股（各股票所有玩家持有股數的總和）記在私密文件的 float；第一次沒有紀錄時，掃描一次玩家資料建立
+async function floatOf(d,o){
+  if(o.data.float)return {...o.data.float};
+  const f={};for(const {data:pl} of await d.db.list("players"))for(const [k,q] of Object.entries(pl.hold||{}))f[k]=(f[k]||0)+Math.max(0,Number(q)||0);
+  return f;
+}
 // 買賣：只需要 Google 登入，不需要連結 IA
 async function trade(d,a,{stockId,dir,shares=1}={}){
   if(!/^[a-z]{2,20}$/.test(stockId||"")||(dir!==1&&dir!==-1)||!Number.isInteger(shares)||shares<1||shares>L.MAX_SHARES)throw bad(`股數需為 1～${L.MAX_SHARES} 的整數`);
@@ -301,9 +309,11 @@ async function trade(d,a,{stockId,dir,shares=1}={}){
     if(!s)throw new HttpError(404,"not-found","找不到這檔股票");
     let r;try{r=L.trade(p?p.data:{cash:START,hold:{}},stockId,s.price,dir,shares);}
     catch(e){throw new HttpError(409,"failed-precondition",e.message);}
-    const now=d.now();   // 買進推升、賣出壓低上漲機率（買賣壓力）；不直接改價格，避免買賣套利
+    const now=d.now(),fl=await floatOf(d,o),before=Math.max(0,Number(fl[stockId]||0),Number(p?.data.hold?.[stockId]||0));
+    fl[stockId]=Math.max(0,before+dir*shares,Number(r.hold[stockId]||0));   // 全服持股；至少不會少於這位玩家自己的持股
+    // 買進推升、賣出壓低上漲機率（買賣壓力，看占全服持股的比例）；不直接改價格，避免買賣套利
     await d.db.commit([
-      {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:L.tradeNudge(L.effOdds(o.data.bias?.[stockId],now),dir,shares),at:now}}},pre:o.version},
+      {path:PRIV,data:{float:fl,bias:{...o.data.bias,[stockId]:{v:L.tradeNudge(L.effOdds(o.data.bias?.[stockId],now,0),dir,shares,before),at:now}}},pre:o.version},
       {path:pid,data:{...(p?{}:{name:a.name||"玩家"}),cash:r.cash,hold:r.hold},pre:p?p.version:null}]);
     return {ok:true,cash:r.cash,hold:r.hold};
   });

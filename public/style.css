@@ -968,3 +968,7 @@ textarea.px-in {
 .tk-btn:focus-visible{outline:2px dashed var(--cyan);outline-offset:-4px;}
 @keyframes tk{from{transform:translateX(0);}to{transform:translateX(-50%);}}
 @media (prefers-reduced-motion:reduce){.tk-track{animation:none;}.tk-btn{overflow-x:auto;}.tk-item[aria-hidden="true"]{display:none;}}
+.tk-wrap{display:flex;align-items:stretch;}
+.tk-wrap .tk-btn{flex:1 1 auto;min-width:0;width:auto;}
+.tk-close{flex:none;width:40px;background:#0b1220;border:0;border-left:2px solid var(--mag);color:var(--tx);font:inherit;font-size:16px;cursor:pointer;}
+.tk-close:hover,.tk-close:focus-visible{background:var(--amber);color:#1a1200;}

@@ -22,7 +22,7 @@ export default {
   // 排程觸發：讓行情自己隨機漲跌
   async scheduled(event,env,ctx){
     const d=deps(env);
-    if(new Date(d.now()).getUTCMinutes()%1===0)ctx.waitUntil(tick(d).catch(e=>console.error("tick failed",e?.name)));
+    ctx.waitUntil(tick(d).catch(e=>console.error("tick failed",e?.name)));
     ctx.waitUntil(publishScheduledNews(d).catch(e=>console.error("scheduled news failed",e?.name)));
     ctx.waitUntil(generateDailyTask(d).catch(e=>console.error("daily task generation failed",e?.name)));
     ctx.waitUntil(generateAutoNews(d).catch(e=>console.error("auto news failed",e?.name)));

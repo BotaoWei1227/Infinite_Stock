@@ -97,6 +97,12 @@ async function act(name,data){
   catch(e){if(/授權失效/.test(e.message)){token=null;}say(e.message);return null;}
   finally{busy=false;render();}
 }
+// 借貸保釋：被黑道抓走、搶劫被捕都一樣；銀行頁與黑市頁都有這個按鈕
+function bailBlock(hidden=false){
+  return el("div",{class:"bailbox",hidden},
+    el("p",{class:"hot",text:`⛓ 你正在服刑。可以借 ${fmt(BAIL)} 的保釋貸款立刻出獄（被黑道抓走、搶劫或搶銀行被捕都適用）：這筆錢不會進你的口袋，直接成為欠款（照一般貸款利率滾利，欠款超過 ${MOB_LIMIT} 並拖過 24 小時黑道還是會上門）。`}),
+    el("button",{class:"px-btn pri",type:"button",text:"借貸保釋",disabled:busy,onclick:async()=>{if(!confirm(`借 ${fmt(BAIL)} 保釋貸款並出獄？這筆錢會計入欠款。`))return;const r=await act("bank",{action:"bail"});if(r)say(`已保釋出獄，目前欠款 ${fmt(r.owed)}`);}}));
+}
 const REL={direct:"直接相關",strong:"高度相關",weak:"勉強相關",none:"無關"};
 async function inject(id){
   if(!token&&!isDev)return say("投入造物需要先連結《無限煉製》帳號（買賣與銀行不用）");
@@ -155,7 +161,7 @@ const bankAct=async(action,amount,all)=>{const r=await act("bank",{action,amount
 const winBar=(title,extra)=>el("div",{class:"bar"},el("span",{class:"tt",text:title}),...(extra||[]));
 function chart(s){ // 像素折線圖：紅漲綠跌，標示最高/最低與涵蓋時間
   const pts=s.p||[s.price],n=pts.length;
-  if(n<2){return el("div",{class:"chart mu",text:"走勢資料累積中…（每 2 分鐘一個點）",style:"display:grid;place-items:center"});}
+  if(n<2){return el("div",{class:"chart mu",text:"走勢資料累積中…（每 1 分鐘一個點）",style:"display:grid;place-items:center"});}
   const W=300,H=84,P=8,lo=Math.min(...pts),hi=Math.max(...pts),rg=(hi-lo)||1;
   const X=i=>P+i*(W-2*P)/(n-1),Y=v=>H-P-6-(v-lo)/rg*(H-2*P-10),NS="http://www.w3.org/2000/svg";
   const svg=document.createElementNS(NS,"svg");svg.setAttribute("viewBox",`0 0 ${W} ${H}`);svg.setAttribute("class","chart");svg.setAttribute("role","img");
@@ -239,16 +245,21 @@ function renderMarket(){
 // ---------- 財經新聞 ----------
 // 玩家只看得到：名稱、內容、時間、普發現金。活動對機率的影響只有開發者看得到。
 // 跑馬燈：新聞發布後 TICKER_MS 內、活動還沒結束，就在頁面最上方滾動顯示標題；點一下進財經新聞
-const TICKER_MS=3*36e5;let tickSig="";
+const TICKER_MS=3*36e5;let tickSig="",tickerOff=false;
+try{tickerOff=localStorage.getItem("tickerOff")==="1";}catch{}
+function setTicker(on){tickerOff=!on;try{localStorage.setItem("tickerOff",on?"0":"1");}catch{}tickSig="";renderTicker();if(view==="set")renderSet();}
 function renderTicker(){
   const t=$("ticker");if(!t)return;
+  if(tickerOff){t.hidden=true;tickSig="";return;}
   const now=nowS(),items=newsList.filter(n=>{const at=n.at?.toMillis?.()??Number(n.at);return Number.isFinite(at)&&at<=now+6e4&&now-at<TICKER_MS&&n.endsAt>now;}).map(n=>n.title).filter(Boolean);
   const sig=items.join("\u0001");if(sig===tickSig)return;tickSig=sig;
   t.hidden=!items.length;if(!items.length){t.replaceChildren();return;}
   const text="📰 快訊　"+items.join("　★　")+"　　　";
   const track=el("div",{class:"tk-track"},el("span",{class:"tk-item",text}),el("span",{class:"tk-item","aria-hidden":"true",text}));
   track.style.animationDuration=Math.max(14,[...text].length*.45)+"s";
-  t.replaceChildren(el("button",{type:"button",class:"tk-btn","aria-label":"財經快訊："+items.join("、")+"。點一下看財經新聞",onclick:()=>setView("news")},track));
+  t.replaceChildren(el("div",{class:"tk-wrap"},
+    el("button",{type:"button",class:"tk-btn","aria-label":"財經快訊："+items.join("、")+"。點一下看財經新聞",onclick:()=>setView("news")},track),
+    el("button",{type:"button",class:"tk-close","aria-label":"關閉新聞跑馬燈（可以到設定重新開啟）",title:"關閉跑馬燈",onclick:()=>{setTicker(false);say("已關閉新聞跑馬燈，可以到「設定」重新開啟");},text:"✕"})));
 }
 function newsTime(n){const t=n.at?.toDate?.();return t?t.toLocaleString("zh-TW",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit",hour12:false}):"";}
 const taipeiInputEpoch=v=>{const m=/^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)$/.exec(v||"");return m?Date.UTC(+m[1],+m[2]-1,+m[3],+m[4],+m[5])-8*3600000:0;};
@@ -364,9 +375,7 @@ function buildBank(){
   bk.b1=el("button",{class:"px-btn pri",type:"button",text:"借款",onclick:()=>{const a=parseFloat(bk.amt.value);if(!(a>0))return say("請輸入金額");bankAct("borrow",a).then(r=>{if(r)bk.amt.value="";});}});
   bk.b2=el("button",{class:"px-btn",type:"button",text:"還款",onclick:()=>{const a=parseFloat(bk.amt.value);if(!(a>0))return say("請輸入金額");bankAct("repay",a).then(r=>{if(r)bk.amt.value="";});}});
   bk.b3=el("button",{class:"px-btn",type:"button",text:"全額還清",onclick:()=>bankAct("repay",0,true)});
-  bk.bail=el("div",{class:"bailbox",hidden:true},
-    el("p",{class:"hot",text:`⛓ 你正在服刑。可以借 ${fmt(BAIL)} 的保釋貸款立刻出獄：這筆錢不會進你的口袋，直接成為欠款（照一般貸款利率滾利，欠款超過 ${MOB_LIMIT} 並拖過 24 小時黑道還是會上門）。`}),
-    el("button",{class:"px-btn pri",type:"button",text:"借貸保釋",onclick:async()=>{if(!confirm(`借 ${fmt(BAIL)} 保釋貸款並出獄？這筆錢會計入欠款。`))return;const r=await act("bank",{action:"bail"});if(r)say(`已保釋出獄，目前欠款 ${fmt(r.owed)}`);}}));
+  bk.bail=bailBlock(true);
   b.append(
     el("p",{class:"mu",text:`高利貸：利率 ${(gameSettings.loanRate*100).toFixed(2)}%／24 小時（約每小時 ${hr}%，利息持續複利累計），想借多少都行。`}),
     el("div",{class:"grid"},
@@ -453,6 +462,8 @@ function renderSet(){
   const saveName=el("button",{class:"px-btn pri",type:"button",text:"儲存名稱",disabled:!user,onclick:async()=>{const r=await act("profile",{name:pname.value});if(r){me.customName=r.name;say("排行榜名稱已更新");renderSet();}}});
   const body=el("div",{class:"body"},el("h2",{class:"h2",text:"玩家名稱"}),el("p",{class:"mu",text:user?"排行榜會顯示這個名稱；留空不允許。最多 20 字。":"登入後即可設定排行榜顯示名稱。"}),pname,saveName,
     el("h2",{class:"h2",text:"介面大小"}),seg,
+    el("h2",{class:"h2",text:"新聞跑馬燈"}),el("p",{class:"mu",text:"有新聞發布時，頁面最上方會滾動顯示標題。"}),
+    el("div",{class:"seg",role:"group","aria-label":"新聞跑馬燈"},...[[true,"開啟"],[false,"關閉"]].map(([on,name])=>el("button",{class:"px-btn",type:"button","aria-pressed":String(on===!tickerOff),text:name,onclick:()=>setTicker(on)}))),
     el("h2",{class:"h2",text:"Google API Key"}),el("p",{class:"mu",text:"AI 判定造物時使用你自己的 Key；也可以按右上角的 ⚙。"}),
     el("button",{class:"px-btn",type:"button",text:"開啟 API 設定",onclick:()=>$("settings").showModal()}));
   w.append(body);
@@ -478,7 +489,7 @@ function setView(v){
 }
 function render(){
   renderTicker();
-  const rule=document.querySelector(".rule");if(rule)rule.textContent=`股價會自己隨機漲跌。AI 會替造物評出與股票主題的相似度（0–100）：超過目前 ${gameSettings.threshold}% 門檻才算相關，會提高上漲機率；低於門檻會提高下跌機率（越接近門檻影響越小），效果會慢慢消退。每個造物只能投入一次，不能重複。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力；每個人的影響都很小，人多才會明顯。`;
+  const rule=document.querySelector(".rule");if(rule)rule.textContent=`股價會自己隨機漲跌。AI 會替造物評出與股票主題的相似度（0–100）：超過目前 ${gameSettings.threshold}% 門檻才算相關，會提高上漲機率；低於門檻會提高下跌機率（越接近門檻影響越小），效果會慢慢消退。每個造物只能投入一次，不能重複。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力：影響大小看你買賣的股數占全服持股的比例，賣掉大部分持股會重創，買賣 1 股幾乎沒有影響。`;
   if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：可以在造物視窗直接打字輸入造物名稱":!token?"買賣與銀行可以直接玩；連結《無限煉製》帳號才能投入造物":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」":"";
   if(me.jailUntil>Date.now())$("msg").textContent="你目前正在服刑，剩餘 "+prisonLeft(me.jailUntil)+"；服刑期間不能進行遊戲操作，但可以到銀行借貸保釋。";
   renderStrip();
@@ -509,17 +520,17 @@ async function renderBlackmarket(){
   if(!user){host.append(el("p",{class:"mu",text:"登入 Google 帳號後使用黑市。"}));return;}
   host.append(el("p",{class:"warn",text:"搶玩家：黑市費 10,000 元，成功率 30%，搶走對方現金的 30%；被抓機率 70%，另罰 10,000 元並服刑 24 小時。被抓時搶款不會轉出，需備妥 20,000 元。"}),
     el("p",{class:"warn",text:"搶銀行：黑市費 5,000 元，成功率 10%；成功獲得 50,000 元。失敗被捕，罰 10,000 元並服刑 24 小時，需備妥 15,000 元。"}));
-  if(me.jailUntil>Date.now()){host.append(el("p",{class:"hot",text:"你正在服刑，還要 "+prisonLeft(me.jailUntil)+"。"}));return;}
+  if(me.jailUntil>Date.now()){host.append(el("p",{class:"hot",text:"你正在服刑，還要 "+prisonLeft(me.jailUntil)+"。"}),bailBlock());return;}
   const sel=el("select",{class:"px-sel","aria-label":"選擇搶劫目標"});sel.append(new Option("載入玩家名單…",""));
   const result=el("div",{class:"mu"});
   const playerBtn=el("button",{class:"px-btn pri",type:"button",disabled:true,text:"搶這位玩家",onclick:async()=>{
     if(!sel.value)return say("請選擇目標玩家");if(!confirm("確定花 10,000 元嘗試搶劫？被抓另罰 10,000 元並關押一天。"))return;
-    const r=await act("blackmarket",{action:"rob-player",targetUid:sel.value});if(r){say(r.caught?"被捕！罰金 "+fmt(r.fine)+"，服刑 24 小時；搶款已歸還。":"得手！搶到 "+fmt(r.stolen)+"，已扣除黑市費 "+fmt(r.fee)+"。");renderStrip();}
+    const r=await act("blackmarket",{action:"rob-player",targetUid:sel.value});if(r){say(r.caught?"被捕！罰金 "+fmt(r.fine)+"，服刑 24 小時；搶款已歸還。可以借貸保釋提前出獄。":"得手！搶到 "+fmt(r.stolen)+"，已扣除黑市費 "+fmt(r.fee)+"。");renderStrip();}
   }});
   sel.onchange=()=>{playerBtn.disabled=busy||!sel.value;};
   const bankBtn=el("button",{class:"px-btn",type:"button",disabled:busy||Number(me.cash)<15000,text:"搶銀行",onclick:async()=>{
     if(!confirm("確定花 5,000 元搶銀行？成功可得 50,000 元，失敗會被捕、罰 10,000 元並關押一天。"))return;
-    const r=await act("blackmarket",{action:"rob-bank"});if(r){say(r.caught?"銀行警鈴響了！罰金 "+fmt(r.fine)+"，服刑 24 小時。":"成功搶到 "+fmt(r.loot)+"！已扣除費用 "+fmt(r.fee)+"。");renderStrip();}
+    const r=await act("blackmarket",{action:"rob-bank"});if(r){say(r.caught?"銀行警鈴響了！罰金 "+fmt(r.fine)+"，服刑 24 小時。可以借貸保釋提前出獄。":"成功搶到 "+fmt(r.loot)+"！已扣除費用 "+fmt(r.fee)+"。");renderStrip();}
   }});
   host.append(el("label",{class:"lbl",text:"搶劫玩家目標"}),sel,el("div",{class:"row"},playerBtn,bankBtn),result);
   try{const r=await fetch(CFG.api+"/blackmarket",{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:JSON.stringify({action:"targets"})}),j=await r.json();if(!r.ok)throw Error(j.error?.message||"載入失敗");

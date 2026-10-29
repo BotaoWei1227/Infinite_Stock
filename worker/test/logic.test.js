@@ -1,5 +1,5 @@
 import test from "node:test";import assert from "node:assert";
-import {effOdds,activeEvents,eventShift,markClaim,MAX_SHIFT,MAX_EVENTS,demValue,tdValue,tdEnd,settle,depositsValue,demIn,demOut,tdIn,tdBreak,DEM_RATE,TD_RATE,TD_DAYS,MAX_TDS,effBias,DECAY,DECAY_MS,SIM_THRESHOLD,passes,upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,TRADE_NUDGE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
+import {effOdds,activeEvents,eventShift,markClaim,MAX_SHIFT,MAX_EVENTS,demValue,tdValue,tdEnd,settle,depositsValue,demIn,demOut,tdIn,tdBreak,DEM_RATE,TD_RATE,TD_DAYS,MAX_TDS,effBias,DECAY,DECAY_MS,SIM_THRESHOLD,passes,upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,FLOAT_FLOOR,TRADE_PRESSURE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
 const near=(a,b,e=1e-9)=>Math.abs(a-b)<e;
 const S=(o={})=>({price:12,base:12,bias:0,t:[0],p:[12],...o});
 test("相似度門檻：要高過 70 才算相關；越高於/低於門檻影響越大；等於門檻沒有影響",()=>{
@@ -8,18 +8,25 @@ test("相似度門檻：要高過 70 才算相關；越高於/低於門檻影響
   assert.ok(near(nudge(0,85),.025));assert.ok(near(nudge(0,71),.05/30));                  // 剛高過門檻 → 只有一點點
   assert.ok(near(nudge(0,35),-.025));assert.ok(near(nudge(0,69),-.05/70));                // 剛低於門檻 → 只降一點點
   assert.equal(nudge(.14,100),.15);assert.equal(nudge(-.14,0),-.15);                      // 上限 ±15 個百分點
-  assert.ok(near(tradeNudge(0,1),.01));assert.ok(near(tradeNudge(0,-1),-.01));assert.equal(tradeNudge(.15,1),.15);assert.equal(tradeNudge(-.15,-1),-.15);
+  assert.equal(FLOAT_FLOOR,100);assert.equal(TRADE_PRESSURE,.3);
+  // 買賣壓力＝交易股數占全服持股的比例 × 30 個百分點（全服持股至少當成 100 股）
+  assert.ok(near(tradeNudge(0,1,1,1000),.0003));assert.ok(near(tradeNudge(0,-1,1,1000),-.0003));    // 1 股 / 1000 股：幾乎沒影響
+  assert.ok(near(tradeNudge(0,-1,50,1000),-.015));                                                 // 賣掉 5%：-1.5 個百分點
+  assert.equal(tradeNudge(0,-1,900,1000),-.15);assert.equal(tradeNudge(0,1,900,1000),.15);          // 賣掉 90%：重創（碰到上限）
+  assert.ok(near(tradeNudge(0,1,1,0),.003));assert.ok(near(tradeNudge(0,1,5,20),.015));            // 全服持股很少時，用 100 股當分母
+  assert.ok(near(tradeNudge(0,1,500,50),.3>.15?.15:.3));                                           // 一次買超過全服持股：比例最多當 100%
+  assert.equal(tradeNudge(.15,1,1,1000)>.15,false);assert.equal(tradeNudge(-.15,-1,1,1000),-.15);
   assert.ok(near(upProb(.3),.8));assert.equal(upProb(.4),.9);assert.equal(upProb(-.4),.1);
-  assert.equal(INJECT_MAX,.05);assert.equal(BIAS_CAP,.15);assert.equal(TRADE_NUDGE,.01);
+  assert.equal(INJECT_MAX,.05);assert.equal(BIAS_CAP,.15);
   let b=0;for(let i=0;i<100;i++)b=nudge(b,100);assert.equal(b,.15);                      // 100 個人狂投也只到 65%
 });
-test("走一步：機率決定方向，幅度 0.3–1.5%",()=>{
-  assert.equal(step(S(),.4,.5,1).price,12.11);   // r1<0.5 → 漲
-  assert.equal(step(S(),.6,.5,1).price,11.89);   // r1>0.5 → 跌
-  assert.equal(step(S(),.7,.5,1,.3).price,12.11); // 偏移 +0.3 → 上漲機率 80%，0.7 仍漲
-  assert.equal(step(S(),.4,.5,1,-.3).price,11.89); // 偏移 -0.3 → 上漲機率 20%，0.4 反而跌
+test("走一步（每分鐘一步）：機率決定方向，幅度 0.15–0.75%",()=>{
+  assert.equal(step(S(),.4,.5,1).price,12.05);   // r1<0.5 → 漲
+  assert.equal(step(S(),.6,.5,1).price,11.95);   // r1>0.5 → 跌
+  assert.equal(step(S(),.7,.5,1,.3).price,12.05); // 偏移 +0.3 → 上漲機率 80%，0.7 仍漲
+  assert.equal(step(S(),.4,.5,1,-.3).price,11.95); // 偏移 -0.3 → 上漲機率 20%，0.4 反而跌
   const lo=step(S(),.4,0,1).price/12-1,hi=step(S(),.4,1,1).price/12-1;
-  assert.ok(lo>=.0029&&hi<=.0151);
+  assert.ok(lo>=.00145&&hi<=.00755);
 });
 test("價格下限 1；均值回歸；公開行情不含機率欄位；私密偏移按時間衰減",()=>{
   assert.equal(step(S({price:1,base:1}),.9,.5,1).price,1);

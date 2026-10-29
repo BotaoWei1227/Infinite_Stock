@@ -1,5 +1,6 @@
 // 純函式：隨機行情、機率偏移、買賣、24 小時資格
-export const DAY=864e5,MAXH=180; // 走勢圖保留最近 180 個點（每 2 分鐘一點≈6 小時）
+export const DAY=864e5,TICK_MIN=1,MAXH=360; // 行情每 1 分鐘走一步；走勢圖保留最近 360 個點（≈6 小時）
+const STEP_K=TICK_MIN/2;           // 原本每 2 分鐘一步；改成每分鐘後，單步幅度與均值回歸按比例縮小，讓每小時的漲跌節奏大致不變
 export const clamp=(x,a,b)=>Math.min(b,Math.max(a,x));
 const rd=n=>Math.round(n*100)/100;
 export const upProb=bias=>clamp(.5+bias,.1,.9);
@@ -10,20 +11,23 @@ export const upProb=bias=>clamp(.5+bias,.1,.9);
 //   衰減：每過 5 分鐘只剩 90%（高於 50% 的機率往下掉、低於 50% 的往上回升），小於 0.5 個百分點就直接歸零（回到 50%）。按真實時間計算，與排程間隔無關
 export const MAX_SHARES=100000;
 export const INJECT_MAX=.05,BIAS_CAP=.15,TRADE_NUDGE=.01,DECAY=.9,DECAY_MS=5*60*1000;
-export const effBias=(s,now)=>{const b=s.bias||0;if(!b)return 0;const e=b*Math.pow(DECAY,Math.max(0,now-(s.biasAt??now))/DECAY_MS);return Math.abs(e)<.005?0:e;};
+export const effBias=(s,now,eps=.005)=>{const b=s.bias||0;if(!b)return 0;const e=b*Math.pow(DECAY,Math.max(0,now-(s.biasAt??now))/DECAY_MS);return Math.abs(e)<eps?0:e;};   // eps：小於這個值視為 0（排程讀取用；累加買賣壓力時傳 0，讓很多小單也能慢慢疊起來）
 // 相似度（0–100）必須「高過」門檻才算相關：相似度越高於門檻，提高上漲機率越多（100 時為滿額）；
 // 沒高過就視為無關：越低於門檻，提高下跌機率越多（0 時為滿額）。剛好等於門檻 → 沒有影響
 export const SIM_THRESHOLD=70;
 export const passes=(sim,threshold=SIM_THRESHOLD)=>sim>threshold;
 export const nudge=(bias,sim,threshold=SIM_THRESHOLD)=>clamp((bias||0)+(passes(sim,threshold)?(sim-threshold)/(100-threshold):-(threshold-sim)/threshold)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
-export const tradeNudge=(bias,dir,shares=1)=>clamp((bias||0)+dir*TRADE_NUDGE*shares,-BIAS_CAP,BIAS_CAP);
+// 買賣壓力看「這筆交易占全服持股的比例」：比例 × TRADE_PRESSURE 個百分點（總偏移仍受 BIAS_CAP 限制）。
+// 全服持股太少時至少當成有 FLOAT_FLOOR 股，避免只有幾股的時候一股就等於全部。
+export const FLOAT_FLOOR=100,TRADE_PRESSURE=.30;
+export const tradeNudge=(bias,dir,shares=1,float=0)=>clamp((bias||0)+dir*TRADE_PRESSURE*Math.min(1,shares/Math.max(FLOAT_FLOOR,Number(float)||0)),-BIAS_CAP,BIAS_CAP);
 // 私密機率紀錄 rec＝{v:偏移, at:時間}（存在只有伺服器讀得到的文件）；回傳「現在」衰減後的偏移
-export const effOdds=(rec,now)=>rec?effBias({bias:rec.v,biasAt:rec.at},now):0;
+export const effOdds=(rec,now,eps)=>rec?effBias({bias:rec.v,biasAt:rec.at},now,eps):0;
 // 行情走一步：方向隨機（上漲機率 = .5+衰減後的偏移 bias+活動基準偏移 shift），幅度 0.3–1.5%，加微弱均值回歸避免漂離基準價。
 // 回傳的股票只含公開欄位（機率資訊絕不放進公開行情）
 export function step(s,r1,r2,now,bias=0,shift=0,last){
   const {bias:_b,biasAt:_a,...pub}=s;
-  const up=r1<upProb(bias+shift),mag=.003+r2*.012,pull=.01*Math.log(s.base/s.price);
+  const up=r1<upProb(bias+shift),mag=(.003+r2*.012)*STEP_K,pull=.01*STEP_K*Math.log(s.base/s.price);
   const price=clamp(rd(s.price*(1+(up?mag:-mag)+pull)),1,s.base*5);
   return {...pub,price,t:[...(s.t||[]),now].slice(-MAXH),p:[...(s.p||[]),price].slice(-MAXH),...(last!==undefined?{last}:{})};
 }
