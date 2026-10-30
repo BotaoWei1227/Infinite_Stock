@@ -15,7 +15,7 @@
 <header class="top">
   <button id="menu" class="px-btn gear" type="button" aria-label="選單" aria-haspopup="dialog">☰</button>
   <h1 class="logo px">煉金<span>交易所</span></h1>
-  <div class="top-r"><button id="mode" class="px-btn gear" type="button" aria-label="切換到大富翁">🎲</button><button id="gear" class="px-btn gear" type="button" aria-label="Google API Key 設定" aria-haspopup="dialog">⚙</button></div>
+  <div class="top-r"><button id="mode" class="px-btn gear" type="button" aria-label="切換到大富翁">🎲</button><button id="gear" class="px-btn gear" type="button" aria-label="設定">⚙</button></div>
 </header>
 <main>
   <section id="strip" class="strip" aria-label="帳號與資產"></section>
@@ -23,9 +23,9 @@
 
   <div id="v-trade" class="view">
     <p class="note">玩家製作的非官方小遊戲，非《無限煉製》官方活動。遊戲幣無實際價值，不提供任何官方獎勵。</p>
-    <p class="rule">股價會自己隨機漲跌。AI 會替造物評出與股票主題的相似度（0–100）：超過目前門檻才算相關，會提高上漲機率；低於門檻會提高下跌機率（越接近門檻影響越小），效果會慢慢消退。每個造物只能投入一次，不能重複。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力；影響大小看你買賣的股數占全服持股的比例，賣掉大部分持股會重創，買賣 1 股幾乎沒有影響。</p>
+    <p class="rule"></p>
     <section id="shutter" class="win shutter" hidden aria-label="休市中"><div class="bar"><span class="tt">CLOSED.EXE</span></div><div class="shutter-door"><div class="px">休市中</div><p>交易所已拉下鐵捲門</p><p>營業時間：台北時間 09:00–24:00</p><small>每日指定造物會在開盤前準備</small></div></section>
-    <section id="craft" class="win" aria-label="選擇造物"></section>
+    <section id="craft" class="win" aria-label="背包"></section>
     <div id="market"></div>
     <section class="win" aria-label="全服動態">
       <div class="bar"><span class="tt">📜 LOG.EXE</span><span class="wb dec" aria-hidden="true">_</span><span class="wb dec" aria-hidden="true">×</span></div>
@@ -62,22 +62,6 @@
   </nav>
 </dialog>
 
-<dialog id="settings" class="win dlg" aria-labelledby="st-title">
-  <div class="bar"><span class="tt" id="st-title">⚙ SETTINGS.SYS</span><button id="close" class="wb" type="button" aria-label="關閉">×</button></div>
-  <div class="body">
-    <h2 class="h2">Google API Key（Gemini）</h2>
-    <p class="mu">AI 判定造物與股票的關聯度時，使用你自己的 Key。Key 只存在這個分頁，關掉就清除；每次投入時隨請求送到伺服器轉呼叫 Gemini，伺服器不儲存、不記錄。</p>
-    <label class="lbl" for="gkey">API Key</label>
-    <input id="gkey" class="px-in" type="password" autocomplete="off" spellcheck="false" placeholder="AIza…">
-    <div class="row">
-      <a class="px-btn pri" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">取得 Google API Key ↗</a>
-      <button id="clearkey" class="px-btn" type="button">清除 Key</button>
-    </div>
-    <p class="mu">狀態：<b id="keystate">尚未設定</b></p>
-    <h2 class="h2">判定模型</h2>
-    <p class="mu"><code id="model" class="px"></code>（固定，無法更改）</p>
-  </div>
-</dialog>
 <script type="module" src="app.js"></script>
 </body>
 </html>

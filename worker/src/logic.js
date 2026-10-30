@@ -1,11 +1,11 @@
-// 純函式：隨機行情、機率偏移、買賣、24 小時資格
+// 純函式：隨機行情、機率偏移、買賣、合成
 export const DAY=864e5,TICK_MIN=1,MAXH=360; // 行情每 1 分鐘走一步；走勢圖保留最近 360 個點（≈6 小時）
 const STEP_K=TICK_MIN/2;           // 原本每 2 分鐘一步；改成每分鐘後，單步幅度與均值回歸按比例縮小，讓每小時的漲跌節奏大致不變
 export const clamp=(x,a,b)=>Math.min(b,Math.max(a,x));
 const rd=n=>Math.round(n*100)/100;
 export const upProb=bias=>clamp(.5+bias,.1,.9);
 // 機率偏移（bias）＝上漲機率 − 50%。人多時每個人的影響都要小，所以單次很輕、總量有上限：
-//   投入造物：相似度高過門檻 → 提高「漲」的機率，沒高過 → 提高「跌」的機率，一次最多 ±5 個百分點
+//   投入元素：提高同名股票「漲」的機率，一次最多 +5 個百分點（基礎元素一半）
 //   買賣：每買 1 股 +1 個百分點、每賣 1 股 −1 個百分點（買賣壓力）
 //   所有人加起來最多 ±15 個百分點（上漲機率 35%–65%）
 //   衰減：每過 5 分鐘只剩 90%（高於 50% 的機率往下掉、低於 50% 的往上回升），小於 0.5 個百分點就直接歸零（回到 50%）。按真實時間計算，與排程間隔無關
@@ -38,24 +38,23 @@ export function trade(d,id,price,dir,shares=1){
   if(dir<0&&n<shares)throw new Error(`持股不足（需要 ${shares} 股）`);
   return {cash:rd(d.cash-dir*price*shares),hold:{...d.hold,[id]:n+dir*shares}};
 }
-// 合成紀錄 → Map(造物名 → 最近一次成功合成時間)：24 小時內、非失敗、時間合理
-export function recent(items,now){
-  const m=new Map();
-  for(const x of items||[]){
-    if(x.failed||!x.result||typeof x.createdAt!=="number"||now-x.createdAt>DAY||x.createdAt>now+60000)continue;
-    if(!(m.get(x.result)>=x.createdAt))m.set(x.result,x.createdAt);
-  }
-  return m;
-}
-// 每個造物，同一個玩家只能投入一次（玩家文件的 used：造物名 → 投入時間）。
-// 名稱先做 NFKC＋小寫＋去頭尾空白（全形/大小寫不能鑽漏洞），並加 "n:" 前綴避開 Firestore 的保留字樣
-export const usedKey=n=>"n:"+String(n).normalize("NFKC").trim().toLowerCase();
-export const usedBefore=(u,name)=>!!u&&(Object.hasOwn(u,usedKey(name))||Object.hasOwn(u,name));   // 也相容舊資料（原樣的名稱）
-const MAX_USED=2000;
-export function markUsed(u,name,now){
-  const m={...(u||{}),[usedKey(name)]:now},keys=Object.keys(m);
-  if(keys.length>MAX_USED)keys.sort((a,b)=>m[a]-m[b]).slice(0,keys.length-MAX_USED).forEach(k=>delete m[k]);
-  return m;
+// ---- 練金合成：元素＝股票。火／水／土／風是基礎元素（可用現金買），蒸氣／雷只能合成出來。
+// 三物合成：拿三個元素，依下面的規則煉成一個元素。投入元素到「同名股票」會提高它的上漲機率（基礎元素 ×0.5、蒸氣／雷 ×1，滿額 5 個百分點）
+export const ELEMENTS=["fire","water","earth","wind","steam","thunder"],BASICS=["fire","water","earth","wind"];
+export const BASE_PRICE=10;                       // 一個基礎元素的價格
+export const INJECT_POWER={fire:.5,water:.5,earth:.5,wind:.5,steam:1,thunder:1};
+export const injectNudge=(bias,id)=>clamp((bias||0)+(INJECT_POWER[id]||0)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
+export const recipeKey=items=>[...items].sort((a,b)=>ELEMENTS.indexOf(a)-ELEMENTS.indexOf(b)).join("+");
+// 規則（依序）：①有風又有蒸氣 → 雷；②火、水、風三種都有 → 雷；③有火又有水 → 蒸氣；④否則取出現最多的元素（三個都不同時取中間的那一個）
+export function craftResult(items){
+  if(!Array.isArray(items)||items.length!==3||items.some(x=>!ELEMENTS.includes(x)))throw new Error("三物合成需要選 3 個元素");
+  const has=e=>items.includes(e),sorted=[...items].sort((a,b)=>ELEMENTS.indexOf(a)-ELEMENTS.indexOf(b));
+  if(has("wind")&&has("steam"))return "thunder";
+  if(has("fire")&&has("water")&&has("wind"))return "thunder";
+  if(has("fire")&&has("water"))return "steam";
+  const cnt={};for(const x of items)cnt[x]=(cnt[x]||0)+1;
+  const top=Object.entries(cnt).sort((a,b)=>b[1]-a[1]||ELEMENTS.indexOf(a[0])-ELEMENTS.indexOf(b[0]))[0];
+  return top[1]>=2?top[0]:sorted[1];
 }
 
 // ---- 銀行（高利貸）：利率 5% / 24 小時，按時間連續複利；可無限借款

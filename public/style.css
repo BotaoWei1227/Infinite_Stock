@@ -972,3 +972,15 @@ textarea.px-in {
 .tk-wrap .tk-btn{flex:1 1 auto;min-width:0;width:auto;}
 .tk-close{flex:none;width:40px;background:#0b1220;border:0;border-left:2px solid var(--mag);color:var(--tx);font:inherit;font-size:16px;cursor:pointer;}
 .tk-close:hover,.tk-close:focus-visible{background:var(--amber);color:#1a1200;}
+
+/* 練金工坊：背包、合成格 */
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0;}
+.echip{border:2px solid var(--line);background:#0b1220;color:var(--tx);padding:4px 10px;font:inherit;font-size:14px;border-radius:0;}
+button.echip{cursor:pointer;min-height:40px;}
+button.echip:hover:not(:disabled),button.echip:focus-visible{border-color:var(--amber);}
+button.echip:disabled{opacity:.45;cursor:default;}
+.slots{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:8px 0;}
+.slot{width:76px;height:76px;border:2px dashed var(--line);background:#0b1220;color:var(--tx);font:inherit;font-size:13px;white-space:pre-line;line-height:1.35;display:grid;place-items:center;cursor:pointer;border-radius:0;}
+.slot.on{border-style:solid;border-color:var(--cyan);}
+.slot.out{border-style:solid;border-color:var(--amber);cursor:default;}
+.arrow{font-size:22px;color:var(--amber);}

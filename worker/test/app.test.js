@@ -2,16 +2,18 @@ import test from "node:test";import assert from "node:assert";
 import {route,tick} from "../src/app.js";import {HttpError} from "../src/errors.js";import {fakeDb} from "./helpers.js";
 const env={ALLOWED_ORIGIN:"https://u.github.io"},H=3600e3,DAYMS=864e5;
 function mk(o={}){
-  const t={v:1.8e12},db=fakeDb(),state={me:{id:"iau_1",workshopName:"測試工坊"},provider:"google.com",uid:"g1",name:"Botao",email:"player@example.com",emailVerified:true,judges:0,iaDown:false};
+  const t={v:1.8e12},db=fakeDb(),state={provider:"google.com",uid:"g1",name:"Botao",email:"player@example.com",emailVerified:true,noSeed:false};
   const d={db,now:()=>t.v,rand:()=>.5,
-    verify:async()=>({uid:state.uid,provider:state.provider,name:state.name,email:state.email,emailVerified:state.emailVerified}),
-    ia:{me:async()=>{if(state.iaDown)throw new HttpError(401,"unauthenticated","授權失效，請重新連結《無限煉製》");return state.me;},
-        history:async()=>[{result:"火",failed:false,createdAt:t.v-H},{result:"雷",failed:false,createdAt:t.v-H},{result:"水",failed:false,createdAt:t.v-25*H},{result:"土",failed:true,createdAt:t.v-H}]},
-    judge:async()=>{state.judges++;return {score:90,reason:"火本身"};},...o};
-  const call=async(p,body)=>{const r=await route(new Request("https://w"+p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})}),env,d);return {status:r.status,body:await r.json(),h:r.headers};};
+    verify:async()=>({uid:state.uid,provider:state.provider,name:state.name,email:state.email,emailVerified:state.emailVerified}),...o};
+  // 投入元素需要背包裡有同名元素：測試預設在每次 /inject 前補 1 個（state.noSeed=true 可關掉，用來測「沒有元素」）
+  const call=async(p,body)=>{
+    if(p==="/inject"&&!state.noSeed&&body?.stockId){const k=`players/${state.uid}`,cur=db.m.get(k);
+      if(cur){if(!(Number(cur.data.inv?.[body.stockId])>=1))cur.data.inv={...(cur.data.inv||{}),[body.stockId]:1};}
+      else db.m.set(k,{v:"seed"+state.uid,data:{cash:50,hold:{},name:state.name,inv:{[body.stockId]:1}}});}
+    const r=await route(new Request("https://w"+p,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})}),env,d);return {status:r.status,body:await r.json(),h:r.headers};};
   return {d,db,t,state,call};
 }
-const inj=(x={})=>({stockId:"fire",itemName:"火",iaToken:"tok12345",geminiKey:"k".repeat(12),...x});
+const inj=(x={})=>({stockId:"fire",...x});
 const TR=(x={})=>({stockId:"fire",dir:1,...x});
 const BK=(x={})=>({...x});
 const MS=db=>db.m.get("market/state").data.stocks;
@@ -26,25 +28,28 @@ test("市場初始化（只做一次）",async()=>{
   const {call,db}=mk();await call("/ensure-market");await call("/ensure-market");
   assert.equal(Object.keys(MS(db)).length,6);assert.equal(MS(db).fire.t.length,1);
 });
-test("投入：只改變機率、價格不跳動；玩家(以 Google uid 為鍵)/動態/綁定一次寫好，CORS 正確",async()=>{
+test("投入元素：只改變機率、價格不跳動；消耗 1 個元素；動態寫好；CORS 正確",async()=>{
   const {call,db}=mk();await call("/ensure-market");
   const r=await call("/inject",inj());
-  assert.equal(r.status,200);assert.equal(r.body.score,90);assert.equal("up" in r.body,false);assert.equal(r.body.price,12);assert.equal(r.body.pass,true);assert.equal(r.body.threshold,70);
+  assert.equal(r.status,200);assert.equal("up" in r.body,false);assert.equal(r.body.price,12);assert.equal(r.body.tier,"basic");assert.equal(r.body.left,0);
   assert.equal(r.h.get("Access-Control-Allow-Origin"),"https://u.github.io");
-  const f=MS(db).fire;assert.ok(Math.abs(BIAS(db)-.05*20/30)<1e-9);assert.equal("bias" in f,false);assert.equal("biasAt" in f,false);assert.deepEqual(f.p,[12]);assert.equal(f.t.length,1);assert.equal(f.last,"火（90分）");   // 沒有新的價格點
+  const f=MS(db).fire;assert.ok(Math.abs(BIAS(db)-.025)<1e-9);assert.equal("bias" in f,false);assert.equal("biasAt" in f,false);assert.deepEqual(f.p,[12]);assert.equal(f.t.length,1);assert.equal(f.last,"🔥火 元素");   // 沒有新的價格點
   assert.equal(MS(db).water.price,10);
-  assert.equal(P(db).name,"測試工坊");assert.equal(P(db).cash,50);assert.deepEqual(P(db).hold,{});assert.ok(typeof P(db).used["n:火"]==="number");
-  assert.equal("up" in feeds(db)[0],false);assert.equal(feeds(db)[0].pass,true);assert.equal("pct" in feeds(db)[0],false);assert.equal(feeds(db)[0].stock,"火");
-  assert.equal(db.m.get("links/g1").data.iaId,"iau_1");assert.equal(db.m.get("iaLinks/iau_1").data.uid,"g1");
+  assert.equal(P(db).name,"Botao");assert.equal(P(db).cash,50);assert.equal(P(db).inv.fire,0);
+  const fd=feeds(db)[0];assert.equal("up" in fd,false);assert.equal(fd.element,true);assert.equal(fd.tier,"basic");assert.equal(fd.stock,"火");
+  assert.equal(db.m.has("links/g1"),false);assert.equal(db.m.has("iaLinks/iau_1"),false);                 // 不再綁定無限煉製
 });
-test("無關造物提高下跌機率",async()=>{
-  const {call,db}=mk({judge:async()=>({score:10,reason:"無關"})});await call("/ensure-market");
-  const r=await call("/inject",inj());assert.equal("up" in r.body,false);assert.equal(r.body.pass,false);assert.ok(BIAS(db)<0);
+test("投入元素：蒸氣／雷滿額 +5 個百分點、基礎元素一半；沒有元素不能投、不是元素的股票代號被拒絕",async()=>{
+  const {call,db,state,t}=mk();await call("/ensure-market");
+  assert.equal((await call("/inject",inj({stockId:"steam"}))).body.tier,"crafted");t.v+=9000;assert.ok(Math.abs(BIAS(db,"steam")-.05)<1e-9);
+  assert.equal((await call("/inject",inj({stockId:"wind"}))).body.tier,"basic");assert.ok(Math.abs(BIAS(db,"wind")-.025)<1e-9);t.v+=9000;
+  state.noSeed=true;const r=await call("/inject",inj({stockId:"water"}));assert.equal(r.status,409);assert.match(r.body.error.message,/沒有「水」元素/);
+  assert.equal((await call("/inject",inj({stockId:"nope"}))).status,400);assert.equal((await call("/inject",{})).status,400);
 });
 test("排程：每檔隨機走一步，偏移衰減；衝突會重試；缺市場時會建立",async()=>{
   const {call,db,d,t}=mk();await call("/ensure-market");await call("/inject",inj());
   t.v+=5*60*1000;await tick(d);
-  const f=MS(db).fire;assert.equal(f.t.length,2);assert.ok(Math.abs(BIAS(db)-.05*20/30)<1e-9);assert.equal("bias" in f,false);assert.equal(MS(db).water.t.length,2);
+  const f=MS(db).fire;assert.equal(f.t.length,2);assert.ok(Math.abs(BIAS(db)-.025)<1e-9);assert.equal("bias" in f,false);assert.equal(MS(db).water.t.length,2);
   db.failNext=2;await tick(d);assert.equal(MS(db).water.t.length,3);
   const e=mk();await tick(e.d);assert.equal(Object.keys(MS(e.db)).length,6);
 });
@@ -53,30 +58,18 @@ test("未登入 / 非 Google 提供者 → 401",async()=>{
   for(const [p,b] of [["/inject",inj()],["/trade",TR()],["/bank",BK({action:"borrow",amount:5})]])assert.equal((await a.call(p,b)).status,401);
   const b=mk({verify:async()=>{throw new HttpError(401,"unauthenticated","x");}});assert.equal((await b.call("/trade",{})).status,401);
 });
-test("24 小時規則：過期與失敗的合成 → 403，且不呼叫 AI",async()=>{
-  const {call,state,db}=mk();await call("/ensure-market");
-  assert.equal((await call("/inject",inj({itemName:"水"}))).status,403);
-  assert.equal((await call("/inject",inj({itemName:"土"}))).status,403);
-  assert.equal(state.judges,0);assert.equal(MS(db).fire.price,12);
-});
 test("冷卻 8 秒",async()=>{
   const {call,t}=mk();await call("/ensure-market");await call("/inject",inj());
   assert.equal((await call("/inject",inj())).status,429);
-  t.v+=9000;assert.equal((await call("/inject",inj({itemName:"雷"}))).status,200);
+  t.v+=9000;assert.equal((await call("/inject",inj({stockId:"thunder"}))).status,200);
 });
-test("Google ↔ 工坊 一對一綁定（投入時檢查）",async()=>{
-  const m=mk();await m.call("/ensure-market");await m.call("/inject",inj());m.t.v+=9000;
-  m.state.uid="g2";assert.equal((await m.call("/inject",inj({itemName:"雷"}))).status,409);
-  m.state.uid="g1";m.state.me={id:"iau_2"};assert.equal((await m.call("/inject",inj({itemName:"雷"}))).status,409);
-});
-test("買賣不需要 IA：IA 失效也能買賣、借款",async()=>{
-  const {call,db,state}=mk();await call("/ensure-market");state.iaDown=true;
+test("買賣與銀行只需要 Google 登入",async()=>{
+  const {call,db}=mk();await call("/ensure-market");
   for(let i=0;i<4;i++)assert.equal((await call("/trade",TR())).status,200);
   assert.deepEqual(P(db),{name:"Botao",cash:2,hold:{fire:4}});
   assert.equal((await call("/trade",TR())).status,409);
   assert.equal((await call("/trade",TR({stockId:"water",dir:-1}))).status,409);
   assert.equal((await call("/bank",BK({action:"borrow",amount:10}))).status,200);
-  assert.equal((await call("/inject",inj())).status,401);                // 只有投入需要 IA
 });
 test("樂觀鎖衝突會自動重試",async()=>{
   const {call,db}=mk();await call("/ensure-market");db.failNext=2;
@@ -88,15 +81,12 @@ test("參數檢查與 OPTIONS",async()=>{
   assert.equal((await call("/trade",TR({dir:5}))).status,400);
   assert.equal((await route(new Request("https://w/inject",{method:"OPTIONS"}),env,d)).status,204);
 });
-test("同一個造物只能投入一次：隔多久都不能再投，其他造物不受影響",async()=>{
-  const {call,db,t}=mk();await call("/ensure-market");
-  assert.equal((await call("/inject",inj())).status,200);
-  assert.ok(typeof P(db).used["n:火"]==="number");
-  t.v+=9000;let r=await call("/inject",inj());assert.equal(r.status,409);assert.match(r.body.error.message,/已經投入過/);
-  r=await call("/inject",inj({itemName:" 火 "}));assert.equal(r.status,409);                       // 加空白也一樣
-  assert.equal((await call("/inject",inj({itemName:"雷"}))).status,200);
-  assert.deepEqual(Object.keys(P(db).used).sort(),["n:火","n:雷"]);
-  t.v+=25*H;assert.equal((await call("/inject",inj())).status,409);                               // 24 小時後（又合成了一次）也不行
+test("元素是消耗品：投入一次用掉 1 個，沒了就不能投；背包有幾個就能投幾次（隔 8 秒）",async()=>{
+  const {call,db,t,state}=mk();await call("/ensure-market");state.noSeed=true;
+  db.m.set("players/g1",{v:"s1",data:{cash:50,hold:{},name:"Botao",inv:{fire:2}}});
+  assert.equal((await call("/inject",inj())).body.left,1);
+  t.v+=9000;assert.equal((await call("/inject",inj())).body.left,0);
+  t.v+=9000;const r=await call("/inject",inj());assert.equal(r.status,409);assert.equal(P(db).inv.fire,0);
 });
 
 test("銀行：無限借款→利息累計→還款；欠款不被其他操作覆蓋",async()=>{
@@ -138,7 +128,7 @@ test("黑道：還到 100 以下就解除；之後超過才重新計時；check 
   a.t.v+=28*H;assert.equal((await a.call("/bank",BK({action:"check"}))).status,200);              // 利息約 5 小時後越線，28 小時時才過 23 小時
   a.t.v+=2*H;const r=await a.call("/bank",BK({action:"check"}));assert.equal(r.status,409);assert.equal(r.body.error.code,"mob");
   const b=mk();await b.call("/ensure-market");await b.call("/bank",BK({action:"borrow",amount:150}));b.t.v+=25*H;
-  const j=await b.call("/inject",inj());assert.equal(j.status,409);assert.equal(j.body.error.code,"mob");assert.equal(b.state.judges,0);   // 不會白花 AI 額度
+  const j=await b.call("/inject",inj());assert.equal(j.status,409);assert.equal(j.body.error.code,"mob");
 });
 test("黑道：安全範圍內（≤100）不會被找上，再久也不會",async()=>{
   const {call,t}=mk();await call("/ensure-market");await call("/bank",BK({action:"borrow",amount:100}));
@@ -149,23 +139,21 @@ test("黑道：安全範圍內（≤100）不會被找上，再久也不會",asy
 
 const DEV="dev@example.com";
 const asDev=(o={})=>{const m=mk({devEmails:[DEV],...o});m.state.email=DEV;m.state.emailVerified=true;return m;};
-test("開發者：不需要 IA，可自己打字輸入任何造物；不計入每日限制；動態會標示",async()=>{
-  const {call,db,state,t}=asDev();await call("/ensure-market");state.iaDown=true;
-  const r=await call("/inject",{stockId:"fire",itemName:"  我亂打的東西  ",geminiKey:"k".repeat(12)});
-  assert.equal(r.status,200);assert.equal(state.judges,1);
-  const f=feeds(db).find(x=>x.item==="我亂打的東西");assert.equal(f.dev,true);assert.equal(f.who,"Botao");
-  assert.equal(P(db).used,undefined);assert.equal(db.m.has("links/g1"),false);                    // 不綁 IA、不記每日使用
-  assert.equal((await call("/inject",{stockId:"fire",itemName:"我亂打的東西",geminiKey:"k".repeat(12)})).status,429);   // 冷卻仍有效
-  t.v+=9000;assert.equal((await call("/inject",{stockId:"fire",itemName:"我亂打的東西",geminiKey:"k".repeat(12)})).status,200); // 同名可重複
-  assert.equal((await call("/inject",{stockId:"fire",itemName:"x".repeat(61),geminiKey:"k".repeat(12)})).status,400);
+test("開發者：投入元素不需要材料、不扣背包；動態會標示；冷卻仍有效",async()=>{
+  const {call,db,state,t}=asDev();await call("/ensure-market");state.noSeed=true;
+  const r=await call("/inject",inj());assert.equal(r.status,200);assert.equal(r.body.up,Math.round(.525*100));
+  const f=feeds(db).find(x=>x.element);assert.equal(f.dev,true);assert.equal(f.who,"Botao");
+  assert.equal(P(db).inv,undefined);
+  assert.equal((await call("/inject",inj())).status,429);
+  t.v+=9000;assert.equal((await call("/inject",inj())).status,200);
 });
 test("開發者判斷：信箱未驗證、不在名單、名單為空、大小寫",async()=>{
-  const a=asDev();a.state.emailVerified=false;await a.call("/ensure-market");a.state.iaDown=true;
-  assert.equal((await a.call("/inject",{stockId:"fire",itemName:"亂打",geminiKey:"k".repeat(12)})).status,401);   // 未驗證 → 當一般玩家，需要 IA
-  const b=mk({devEmails:[DEV]});b.state.email="someone@x.com";b.state.emailVerified=true;await b.call("/ensure-market");b.state.iaDown=true;
-  assert.equal((await b.call("/inject",{stockId:"fire",itemName:"亂打",geminiKey:"k".repeat(12)})).status,401);
-  const c=mk();c.state.email=DEV;c.state.emailVerified=true;await c.call("/ensure-market");c.state.iaDown=true;                      // 沒設定 DEV_EMAILS
-  assert.equal((await c.call("/inject",{stockId:"fire",itemName:"亂打",geminiKey:"k".repeat(12)})).status,401);
+  const a=asDev();a.state.emailVerified=false;a.state.noSeed=true;await a.call("/ensure-market");
+  assert.equal((await a.call("/inject",{stockId:"fire"})).status,409);   // 未驗證 → 當一般玩家，沒有元素不能投
+  const b=mk({devEmails:[DEV]});b.state.email="someone@x.com";b.state.emailVerified=true;b.state.noSeed=true;await b.call("/ensure-market");
+  assert.equal((await b.call("/inject",{stockId:"fire"})).status,409);
+  const c=mk();c.state.email=DEV;c.state.emailVerified=true;c.state.noSeed=true;await c.call("/ensure-market");                      // 沒設定 DEV_EMAILS
+  assert.equal((await c.call("/inject",{stockId:"fire"})).status,409);
   const d2=mk({devEmails:[DEV]});d2.state.email=DEV;d2.state.emailVerified=true;
   assert.equal((await d2.call("/whoami")).body.dev,true);assert.equal((await b.call("/whoami")).body.dev,false);assert.equal((await a.call("/whoami")).body.dev,false);
   a.state.provider="anonymous";assert.equal((await a.call("/whoami")).status,401);
@@ -188,30 +176,22 @@ test("多人同時買賣會疊加但被上限擋住，且彼此不互相覆蓋",
   assert.ok(Math.abs(BIAS(db)-.009)<1e-9);assert.equal(["g1","g2","g3"].every(u=>db.m.get("players/"+u).data.hold.fire===1),true);
 });
 
-test("門檻：剛好等於 70 不算通過（沒有影響）；71 才通過",async()=>{
-  for(const [sim,pass,bias] of [[70,false,0],[71,true,.05/30],[69,false,-.05/70]]){
-    const {call,db}=mk({judge:async()=>({score:sim,reason:"x",relation:"strong"})});await call("/ensure-market");
-    const r=await call("/inject",inj());assert.equal(r.body.pass,pass,String(sim));assert.ok(Math.abs(BIAS(db)-bias)<1e-9,String(sim));
-  }
-});
-
-test("投入的機率提升每 5 分鐘降 10%（兩個方向都回到 50%），且與排程間隔無關",async()=>{
+test("投入的機率提升每 5 分鐘降 10%（回到 50%），且與排程間隔無關",async()=>{
   const M=300000;
-  const up=mk({judge:async()=>({score:100,reason:"x",relation:"direct"})}),dn=mk({judge:async()=>({score:0,reason:"x",relation:"none"})});
-  for(const x of [up,dn]){await x.call("/ensure-market");await x.call("/inject",inj());}
-  assert.ok(Math.abs(EFF(up)-.05)<1e-9);assert.ok(Math.abs(EFF(dn)+.05)<1e-9);
+  const up=mk();await up.call("/ensure-market");await up.call("/inject",inj({stockId:"steam"}));
+  assert.ok(Math.abs(EFF(up,"steam")-.05)<1e-9);
   const seen=[];
-  for(let i=1;i<=40;i++){for(const x of [up,dn]){x.t.v+=M;await tick(x.d);}seen.push([EFF(up),EFF(dn)]);}
-  assert.ok(Math.abs(seen[0][0]-.045)<1e-9&&Math.abs(seen[0][1]+.045)<1e-9);                           // 5 分鐘後剩 90%
-  assert.ok(Math.abs(seen[9][0]-.05*Math.pow(.9,10))<1e-9);                                           // 50 分鐘後
-  assert.deepEqual(seen[39],[0,0]);                                                                   // 久了回到 50%
+  for(let i=1;i<=40;i++){up.t.v+=M;await tick(up.d);seen.push(EFF(up,"steam"));}
+  assert.ok(Math.abs(seen[0]-.045)<1e-9);                                                       // 5 分鐘後剩 90%
+  assert.ok(Math.abs(seen[9]-.05*Math.pow(.9,10))<1e-9);                                        // 50 分鐘後
+  assert.equal(seen[39],0);                                                                     // 久了回到 50%
   // 每 2 分鐘一次與每 10 分鐘一次，結果相同
-  const a=mk({judge:async()=>({score:100,reason:"x",relation:"direct"})}),b=mk({judge:async()=>({score:100,reason:"x",relation:"direct"})});
-  for(const x of [a,b]){await x.call("/ensure-market");await x.call("/inject",inj());}
+  const a=mk(),b=mk();
+  for(const x of [a,b]){await x.call("/ensure-market");await x.call("/inject",inj({stockId:"steam"}));}
   for(let i=0;i<5;i++){a.t.v+=120000;await tick(a.d);}b.t.v+=600000;await tick(b.d);
-  assert.ok(Math.abs(EFF(a)-EFF(b))<1e-9);assert.ok(Math.abs(EFF(a)-.05*.81)<1e-9);
+  assert.ok(Math.abs(EFF(a,"steam")-EFF(b,"steam"))<1e-9);assert.ok(Math.abs(EFF(a,"steam")-.05*.81)<1e-9);
   // 買賣疊加在「已衰減」的值上
-  b.t.v+=M;await b.call("/trade",TR());assert.ok(Math.abs(BIAS(b.db)-(.05*.81*.9+.003))<1e-9);
+  b.t.v+=M;await b.call("/trade",TR({stockId:"steam"}));assert.ok(Math.abs(BIAS(b.db,"steam")-(.05*.81*.9+.003))<1e-9);
 });
 
 test("存款：活存/定存的存入、領出、利息、到期轉換、提前解約；不被其他操作覆蓋",async()=>{
@@ -288,11 +268,11 @@ test("財經新聞：活動期間改變上漲基準機率，結束後自動恢�
   assert.ok(MS(A.db).fire.price<up()+1e-9&&OD(A.db).events.length===0);
   const p1=up();A.t.v+=120000;await tick(A.d);assert.ok(up()<p1);
 });
-test("財經新聞：多個活動疊加；投入造物回報的上漲機率包含活動",async()=>{
+test("財經新聞：多個活動疊加；投入元素回報的上漲機率包含活動",async()=>{
   const A=asDev({rand:()=>.5});await A.call("/ensure-market");
   await A.call("/news",PUB({effects:{fire:10}}));await A.call("/news",PUB({effects:{fire:5},title:"另一則"}));
-  const r=await A.call("/inject",inj());assert.equal(r.status,200);assert.equal(r.body.up,Math.round((.5+.15+.05*20/30)*100));   // 活動 +15、投入 +3.3
-  assert.ok(Math.abs(BIAS(A.db)-.05*20/30)<1e-9);                                                                       // 活動不會混進玩家的偏移
+  const r=await A.call("/inject",inj());assert.equal(r.status,200);assert.equal(r.body.up,Math.round((.5+.15+.025)*100));   // 活動 +15、基礎元素 +2.5
+  assert.ok(Math.abs(BIAS(A.db)-.025)<1e-9);                                                                       // 活動不會混進玩家的偏移
 });
 test("財經新聞：開發者可以提前結束活動",async()=>{
   const {call,db,t}=asDev();await call("/ensure-market");
@@ -343,7 +323,7 @@ test("機率只有開發者看得到：公開文件（行情/新聞/動態/玩�
 });
 test("/odds：只有開發者能查；一般玩家、未驗證信箱、匿名都不行",async()=>{
   const D=asDev();await D.call("/ensure-market");await D.call("/news",PUB({effects:{fire:10}}));await D.call("/inject",inj());
-  const r=await D.call("/odds");assert.equal(r.status,200);assert.equal(r.body.now,D.t.v);assert.ok(Math.abs(r.body.bias.fire.v-.05*20/30)<1e-9);
+  const r=await D.call("/odds");assert.equal(r.status,200);assert.equal(r.body.now,D.t.v);assert.ok(Math.abs(r.body.bias.fire.v-.025)<1e-9);
   assert.equal(r.body.events.length,1);assert.deepEqual(r.body.events[0].shift,{fire:.1});
   D.t.v+=3700000;assert.equal((await D.call("/odds")).body.events.length,0);                                       // 過期活動不回傳
   const P=mk({devEmails:[DEV]});await P.call("/ensure-market");assert.equal((await P.call("/odds")).status,403);
@@ -623,4 +603,39 @@ test("保釋：搶銀行失敗被捕後可以借貸保釋出獄；保釋後可�
   const b=await x.call("/bank",{action:"bail"});assert.equal(b.status,200);assert.equal(b.body.bail,80);
   assert.equal(P(x.db).jailUntil,0);assert.equal(P(x.db).cash,50000-5000-10000);              // 罰金照扣，保釋金不進口袋
   assert.equal((await x.call("/trade",TR())).status,200);
+});
+
+// ================= 練金工坊：買基礎元素、三物合成 =================
+const CR=(x,body)=>x.call("/craft",body);
+test("練金工坊：買基礎元素（10 元一個）；現金不足、蒸氣／雷不能買、數量不合法都被擋",async()=>{
+  const x=mk();await x.call("/ensure-market");seed(x.db,"g1",{cash:100});
+  const r=await CR(x,{action:"buy",element:"fire",qty:3});assert.equal(r.status,200);assert.equal(r.body.cost,30);
+  assert.deepEqual([P(x.db).cash,P(x.db).inv.fire],[70,3]);
+  assert.equal((await CR(x,{action:"buy",element:"steam",qty:1})).status,400);
+  for(const q of [0,-1,1.5,101,"3"])assert.equal((await CR(x,{action:"buy",element:"fire",qty:q})).status,400);
+  assert.equal((await CR(x,{action:"buy",element:"water",qty:8})).status,409);                      // 80 > 70
+  assert.equal(P(x.db).cash,70);
+  assert.equal((await CR(x,{action:"dance"})).status,400);
+});
+test("練金工坊：三物合成消耗 3 個、產出 1 個；記下已發現的配方；材料不夠不能合成",async()=>{
+  const x=mk();await x.call("/ensure-market");seed(x.db,"g1",{cash:1000,inv:{fire:2,water:1,wind:1,earth:1}});
+  const r=await CR(x,{action:"craft",items:["water","fire","fire"]});assert.equal(r.status,200);
+  assert.equal(r.body.result,"steam");assert.equal(r.body.isNew,true);assert.equal(r.body.recipe,"fire+fire+water");
+  assert.deepEqual(P(x.db).inv,{wind:1,earth:1,steam:1});assert.equal(P(x.db).recipes["fire+fire+water"],"steam");assert.equal(P(x.db).crafts,1);
+  const r2=await CR(x,{action:"craft",items:["steam","wind","earth"]});assert.equal(r2.body.result,"thunder");assert.deepEqual(P(x.db).inv,{thunder:1});
+  assert.equal((await CR(x,{action:"craft",items:["fire","fire","fire"]})).status,409);              // 沒有火了
+  for(const bad of [[],["fire"],["fire","fire"],["fire","fire","gold"],"fire+fire+fire",null])assert.equal((await CR(x,{action:"craft",items:bad})).status,400);
+  assert.deepEqual(P(x.db).inv,{thunder:1});                                                         // 失敗的請求不扣材料
+  // 重複同一配方不算新發現
+  P(x.db).inv.fire=2;P(x.db).inv.water=1;x.db.m.get("players/g1").data.inv={fire:2,water:1};
+  assert.equal((await CR(x,{action:"craft",items:["fire","fire","water"]})).body.isNew,false);
+});
+test("練金工坊：完整流程 買材料 → 合成蒸氣 → 投入蒸氣（滿額 +5 個百分點），背包扣光；服刑中不能操作",async()=>{
+  const x=mk();await x.call("/ensure-market");seed(x.db,"g1",{cash:100});x.state.noSeed=true;
+  await CR(x,{action:"buy",element:"fire",qty:2});await CR(x,{action:"buy",element:"water",qty:1});
+  assert.equal((await CR(x,{action:"craft",items:["fire","fire","water"]})).body.result,"steam");
+  const r=await x.call("/inject",{stockId:"steam"});assert.equal(r.status,200);assert.equal(r.body.tier,"crafted");
+  assert.ok(Math.abs(BIAS(x.db,"steam")-.05)<1e-9);assert.equal(P(x.db).inv.steam,0);assert.equal(P(x.db).cash,70);
+  x.db.m.get("players/g1").data.jailUntil=x.t.v+H;
+  assert.equal((await CR(x,{action:"buy",element:"fire",qty:1})).status,403);
 });

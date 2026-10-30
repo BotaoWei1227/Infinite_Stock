@@ -1,5 +1,5 @@
 import test from "node:test";import assert from "node:assert";
-import {effOdds,activeEvents,eventShift,markClaim,MAX_SHIFT,MAX_EVENTS,demValue,tdValue,tdEnd,settle,depositsValue,demIn,demOut,tdIn,tdBreak,DEM_RATE,TD_RATE,TD_DAYS,MAX_TDS,effBias,DECAY,DECAY_MS,SIM_THRESHOLD,passes,upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,FLOAT_FLOOR,TRADE_PRESSURE,step,trade,recent,DAY,MAXH} from "../src/logic.js";
+import {effOdds,activeEvents,eventShift,markClaim,MAX_SHIFT,MAX_EVENTS,demValue,tdValue,tdEnd,settle,depositsValue,demIn,demOut,tdIn,tdBreak,DEM_RATE,TD_RATE,TD_DAYS,MAX_TDS,effBias,DECAY,DECAY_MS,SIM_THRESHOLD,passes,upProb,nudge,tradeNudge,INJECT_MAX,BIAS_CAP,FLOAT_FLOOR,TRADE_PRESSURE,step,trade,DAY,MAXH} from "../src/logic.js";
 const near=(a,b,e=1e-9)=>Math.abs(a-b)<e;
 const S=(o={})=>({price:12,base:12,bias:0,t:[0],p:[12],...o});
 test("相似度門檻：要高過 70 才算相關；越高於/低於門檻影響越大；等於門檻沒有影響",()=>{
@@ -48,26 +48,30 @@ test("買賣",()=>{
   assert.throws(()=>trade({cash:1e9,hold:{}},"fire",12,1,0),/整數/);assert.throws(()=>trade({cash:1e9,hold:{}},"fire",12,1,2.5),/整數/);
   assert.throws(()=>trade({cash:1e9,hold:{}},"fire",12,1,100001),/整數/);
 });
-test("24 小時內的成功合成才算",()=>{
-  const now=1e13,h=3600e3;
-  const m=recent([{result:"火",createdAt:now-h},{result:"火",createdAt:now-2*h},{result:"水",createdAt:now-25*h},
-    {result:null,failed:true,createdAt:now-h},{result:"土",failed:true,createdAt:now-h},{result:"風",createdAt:now+10*h}],now);
-  assert.deepEqual([...m],[["火",now-h]]);
-  assert.equal(recent([{result:"雷",createdAt:now-DAY}],now).has("雷"),true);
-  assert.equal(recent([{result:"雷",createdAt:now-DAY-1}],now).has("雷"),false);
+import {ELEMENTS,BASICS,BASE_PRICE,INJECT_POWER,injectNudge,recipeKey,craftResult,INJECT_MAX as IM,BIAS_CAP as BC} from "../src/logic.js";
+test("三物合成：配方規則（雷＞蒸氣＞多數決）；順序無關；三個都不同取中間",()=>{
+  assert.deepEqual(BASICS,["fire","water","earth","wind"]);assert.equal(BASE_PRICE,10);assert.equal(ELEMENTS.length,6);
+  assert.equal(craftResult(["fire","fire","fire"]),"fire");                      // 三個一樣 → 自己
+  assert.equal(craftResult(["fire","fire","earth"]),"fire");                     // 兩個一樣 → 多數
+  assert.equal(craftResult(["fire","water","earth"]),"steam");                   // 火＋水 → 蒸氣
+  assert.equal(craftResult(["water","fire","fire"]),"steam");
+  assert.equal(craftResult(["fire","water","wind"]),"thunder");                  // 火＋水＋風 → 雷
+  assert.equal(craftResult(["wind","steam","earth"]),"thunder");                 // 風＋蒸氣 → 雷
+  assert.equal(craftResult(["steam","steam","wind"]),"thunder");
+  assert.equal(craftResult(["steam","steam","earth"]),"steam");                  // 蒸氣多數
+  assert.equal(craftResult(["fire","earth","wind"]),"earth");                    // 三個都不同、沒有特殊配方 → 中間的
+  assert.equal(craftResult(["wind","earth","fire"]),craftResult(["fire","wind","earth"]));
+  assert.equal(recipeKey(["wind","fire","water"]),"fire+water+wind");
+  for(const bad of [null,["fire"],["fire","fire"],["fire","fire","fire","fire"],["fire","fire","gold"]])assert.throws(()=>craftResult(bad),/3 個元素/);
+  // 所有 56 種組合都能算出結果，而且結果一定是元素
+  let n=0;for(const a of ELEMENTS)for(const b of ELEMENTS)for(const c of ELEMENTS)if(ELEMENTS.indexOf(a)<=ELEMENTS.indexOf(b)&&ELEMENTS.indexOf(b)<=ELEMENTS.indexOf(c)){n++;assert.ok(ELEMENTS.includes(craftResult([a,b,c])));}
+  assert.equal(n,56);
 });
-import {usedKey,usedBefore,markUsed} from "../src/logic.js";
-test("同一個造物只能投入一次：名稱正規化、舊資料相容、有數量上限",()=>{
-  const now=1e13;
-  let u=markUsed({},"火焰",now);assert.deepEqual(Object.keys(u),["n:火焰"]);
-  assert.equal(usedBefore(u,"火焰"),true);assert.equal(usedBefore(u,"水"),false);assert.equal(usedBefore(undefined,"火焰"),false);
-  assert.equal(usedBefore(markUsed({},"ＡＢ c",now),"ab C"),true);assert.equal(usedKey("  Ｆｉｒｅ "),"n:fire");   // 全形、大小寫、空白都擋
-  assert.equal(usedBefore({火:1},"火"),true);                                                                    // 舊資料（沒有前綴的名稱）也算
-  assert.equal(usedBefore(markUsed({},"__x__",now),"__x__"),true);assert.ok(Object.keys(markUsed({},"__x__",now))[0].startsWith("n:"));
-  let big={};for(let i=0;i<2100;i++)big=markUsed(big,"造物"+i,now+i);
-  assert.equal(Object.keys(big).length,2000);assert.equal(usedBefore(big,"造物0"),false);assert.equal(usedBefore(big,"造物2099"),true);   // 超過上限丟最舊的
+test("投入元素：基礎元素一半、蒸氣與雷滿額；有上限",()=>{
+  assert.deepEqual(INJECT_POWER,{fire:.5,water:.5,earth:.5,wind:.5,steam:1,thunder:1});
+  assert.ok(Math.abs(injectNudge(0,"fire")-IM*.5)<1e-12);assert.ok(Math.abs(injectNudge(0,"steam")-IM)<1e-12);
+  assert.equal(injectNudge(BC,"steam"),BC);assert.equal(injectNudge(0,"nope"),0);
 });
-
 import {owed,borrow,repay,overAt,mobDue,MOB_LIMIT,RATE} from "../src/logic.js";
 test("銀行：5%/24 小時複利、無借款上限、部分/全額還款",()=>{
   const t0=1e13;

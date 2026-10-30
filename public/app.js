@@ -4,73 +4,17 @@ import {getAuth,onAuthStateChanged,GoogleAuthProvider,signInWithPopup,signInWith
 import {createMono} from "./mono.js";
 import {getFirestore,collection,doc,onSnapshot,query,orderBy,limit} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
-const REDIRECT=location.origin+location.pathname; // 必須與 Developer Center 的 Redirect URI 完全一致
 const $=id=>document.getElementById(id),S=sessionStorage;
-const K=(()=>{   // Google API Key：存在這台裝置的瀏覽器（localStorage），下次不用重打；無痕模式等用不了時退回只存這個分頁
-  let ls=null;try{localStorage.setItem("_t","1");localStorage.removeItem("_t");ls=localStorage;}catch{}
-  try{if(ls){const old=S.getItem("gk");if(old&&!ls.getItem("gk")){ls.setItem("gk",old);S.removeItem("gk");}}}catch{}   // 舊版把 Key 放在分頁裡 → 自動搬到本機
-  return {
-    persistent:!!ls,
-    getItem:k=>(ls&&ls.getItem(k))||S.getItem(k),
-    setItem:(k,v)=>{(ls||S).setItem(k,v);if(ls)S.removeItem(k);},
-    removeItem:k=>{if(ls)ls.removeItem(k);S.removeItem(k);}
-  };
-})();
 const fmt=n=>(Math.round(n*100)/100).toFixed(2);
 const prisonLeft=until=>hmLeft(until-Date.now());
 let hinting=true;
 const say=t=>{hinting=false;$("msg").textContent=t;};
-let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},dailyTasks={date:"",tasks:{}},token=null,inv=[],item=null,profile=null,busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,devText="",odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0,analystReport=null,analystStock="",tradeShares=1,marketOpenPrev=null,gameSettings={loanRate:.05,demRate:.004,tdRate:.012,threshold:70},settingsSyncedAt=0;
+let db,auth,user=null,me={cash:CFG.startCash,hold:{},name:"訪客"},stocks={},dailyTasks={date:"",tasks:{}},busy=false,offP=null,collapsed=new Set(),view="trade",bankBuilt=false,isDev=false,odds=null,skew=0,newsList=[],newsErr=false,nf=null,oddsTick=0,analystReport=null,analystStock="",tradeShares=1,marketOpenPrev=null,gameSettings={loanRate:.05,demRate:.004,tdRate:.012,threshold:70},settingsSyncedAt=0;
 
-// ---------- OAuth：Authorization Code + PKCE S256（瀏覽器端） ----------
-const b64u=b=>btoa(String.fromCharCode(...b)).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");
-const rnd=n=>{const v=new Uint8Array(n);crypto.getRandomValues(v);return b64u(v);};
-async function login(){
-  const verifier=rnd(32),state=rnd(24);
-  const ch=b64u(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(verifier))));
-  S.setItem("pk",JSON.stringify({verifier,state}));
-  const u=new URL(CFG.ia.base+"/oauth/authorize");
-  Object.entries({response_type:"code",client_id:CFG.ia.clientId,redirect_uri:REDIRECT,scope:CFG.ia.scope,state,code_challenge:ch,code_challenge_method:"S256"}).forEach(([k,v])=>u.searchParams.set(k,v));
-  location.href=u.href;
-}
-async function handleCallback(){
-  const q=new URLSearchParams(location.search);
-  if(!q.has("code")&&!q.has("error"))return;
-  const pk=JSON.parse(S.getItem("pk")||"{}");S.removeItem("pk");
-  const code=q.get("code"),st=q.get("state"),err=q.get("error");
-  history.replaceState(null,"",location.pathname);
-  if(err)return say("你已取消授權");
-  if(!pk.state||st!==pk.state)return say("授權驗證失敗（state 不符），請重新登入");
-  try{
-    const r=await fetch(CFG.ia.base+"/developer-api/oauth/token",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},
-      body:new URLSearchParams({grant_type:"authorization_code",client_id:CFG.ia.clientId,code,redirect_uri:REDIRECT,code_verifier:pk.verifier})});
-    const j=await r.json();if(!r.ok)throw new Error(j.code||r.status);
-    token=j.access_token;setTimeout(()=>{token=null;render();say("授權已過期，請重新連結");},(j.expires_in||3600)*1000-5000);
-  }catch(e){say("取得授權失敗："+e.message);}
-}
-async function iaGet(path,tries=3){
-  for(let i=0;i<tries;i++){
-    const r=await fetch(CFG.ia.base+"/developer-api/v1/"+path,{headers:{Authorization:"Bearer "+token}});
-    if(r.status===429){await new Promise(s=>setTimeout(s,(2**i)*800+Math.random()*400));continue;}
-    if(r.status===401){token=null;render();throw new Error("授權失效，請重新連結");}
-    if(!r.ok){const j=await r.json().catch(()=>({}));throw new Error(j.code||("HTTP "+r.status));}
-    return r.json();
-  }
-  throw new Error("請求過於頻繁，請稍後再試");
-}
-async function loadIA(){
-  profile=await iaGet("me");const all=[];let off=0;
-  while(off!=null&&all.length<500){const p=await iaGet("history?limit=100&offset="+off);all.push(...p.items);off=p.nextOffset;}
-  const now=Date.now(),m=new Map(); // 只列出 24 小時內成功合成的造物（伺服器會再驗證一次）
-  for(const x of all){if(x.failed||!x.result||now-x.createdAt>864e5)continue;if(!(m.get(x.result)>=x.createdAt))m.set(x.result,x.createdAt);}
-  inv=[...m].map(([name,at])=>({name,at})).sort((a,b)=>b.at-a.at);
-}
 const okUrl=u=>{try{return new URL(u).protocol==="https:"?u:null}catch{return null}};
 const icon=(e,url)=>{const s=document.createElement("span"),u=okUrl(url);s.textContent=e||"❔";
   if(u){const i=new Image();i.className="ic";i.alt="";i.loading="lazy";i.src=u;i.onload=()=>s.replaceChildren(i);}return s;};
 
-const left=at=>{const m=Math.max(0,Math.floor((864e5-(Date.now()-at))/6e4));return m>=60?Math.floor(m/60)+" 小時":m+" 分";};
-const usedBefore=name=>{const u=me.used||{};return Object.hasOwn(u,"n:"+String(name).normalize("NFKC").trim().toLowerCase())||Object.hasOwn(u,name);};   // 同一個造物只能投入一次
 const el=(tag,p={},...kids)=>{const e=document.createElement(tag);
   for(const [k,v] of Object.entries(p)){if(k==="class")e.className=v;else if(k==="text")e.textContent=v;else if(k==="disabled"||k==="hidden")e[k]=!!v;else if(k.startsWith("on"))e[k]=v;else e.setAttribute(k,v);}
   e.append(...kids);return e;};
@@ -82,19 +26,18 @@ async function gLogin(){
     if(e.code!=="auth/popup-closed-by-user"&&e.code!=="auth/cancelled-popup-request")say("Google 登入失敗："+e.code);
   }
 }
-function logoutIA(){token=null;inv=[];item=null;profile=null;render();}
 
-// ---------- 伺服器端行動（Worker 驗證 IA 身分並計算行情） ----------
+// ---------- 伺服器端行動（Worker 驗證 Google 登入並計算行情） ----------
 async function act(name,data){
-  if(busy)return null;if(!user){say("請先以 Google 帳號登入");return null;}if(name==="inject"&&!token&&!isDev){say("投入造物需要先連結《無限煉製》帳號");return null;}
+  if(busy)return null;if(!user){say("請先以 Google 帳號登入");return null;}
   busy=true;say("處理中…");render();
   try{
-    const r=await fetch(CFG.api+"/"+name,{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:JSON.stringify({...data,iaToken:token})});
+    const r=await fetch(CFG.api+"/"+name,{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:JSON.stringify(data)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(j.error?.message||("HTTP "+r.status));
     return j;
   }
-  catch(e){if(/授權失效/.test(e.message)){token=null;}say(e.message);return null;}
+  catch(e){say(e.message);return null;}
   finally{busy=false;render();}
 }
 // 借貸保釋：被黑道抓走、搶劫被捕都一樣；銀行頁與黑市頁都有這個按鈕
@@ -103,14 +46,14 @@ function bailBlock(hidden=false){
     el("p",{class:"hot",text:`⛓ 你正在服刑。可以借 ${fmt(BAIL)} 的保釋貸款立刻出獄（被黑道抓走、搶劫或搶銀行被捕都適用）：這筆錢不會進你的口袋，直接成為欠款（照一般貸款利率滾利，欠款超過 ${MOB_LIMIT} 並拖過 24 小時黑道還是會上門）。`}),
     el("button",{class:"px-btn pri",type:"button",text:"借貸保釋",disabled:busy,onclick:async()=>{if(!confirm(`借 ${fmt(BAIL)} 保釋貸款並出獄？這筆錢會計入欠款。`))return;const r=await act("bank",{action:"bail"});if(r)say(`已保釋出獄，目前欠款 ${fmt(r.owed)}`);}}));
 }
-const REL={direct:"直接相關",strong:"高度相關",weak:"勉強相關",none:"無關"};
+// 元素（＝股票）：名稱與圖示優先用行情資料，沒載入時用備用表
+const ELEM_FALLBACK={fire:["火","🔥"],water:["水","💧"],earth:["土","🪨"],wind:["風","🌪️"],steam:["蒸氣","♨️"],thunder:["雷","⚡"]},ELEM_IDS=Object.keys(ELEM_FALLBACK),BASIC_IDS=["fire","water","earth","wind"],BASE_PRICE=10;
+const elemName=id=>stocks[id]?.name||ELEM_FALLBACK[id]?.[0]||id,elemIcon=id=>stocks[id]?.emoji||ELEM_FALLBACK[id]?.[1]||"❔";
+const invCount=id=>Math.max(0,Number(me.inv?.[id]||0));
 async function inject(id){
-  if(!token&&!isDev)return say("投入造物需要先連結《無限煉製》帳號（買賣與銀行不用）");
-  const typed=isDev?devText.trim():"",itemName=typed||item?.name;
-  if(!itemName)return say(isDev?"請選擇造物，或在上方輸入造物名稱":"請先選擇要投入的造物");
-  if(!K.getItem("gk")){say("請先到右上角 ⚙ 設定 Google API Key");$("settings").showModal?.();return;}
-  const r=await act("inject",{stockId:id,itemName,geminiKey:K.getItem("gk")});
-  if(r){item=null;say(`相似度 ${r.score}${REL[r.relation]?"（"+REL[r.relation]+"）":""}：${r.reason}｜${r.pass?`超過門檻 ${r.threshold}，提高`:`沒超過門檻 ${r.threshold}，降低`}${stocks[id]?.name||""}的上漲機率${r.up!=null?`（現在 ${r.up}%・僅開發者可見）`:""}`);render();}
+  if(!isDev&&invCount(id)<1)return say(`你沒有「${elemName(id)}」元素：到「練金工坊」買基礎元素或三物合成`);
+  const r=await act("inject",{stockId:id});
+  if(r)say(`已投入「${elemName(id)}」元素，提高${elemName(id)}的上漲機率（${r.tier==="crafted"?"高階元素，效果滿額":"基礎元素，效果一半"}）${r.up!=null?`（現在 ${r.up}%・僅開發者可見）`:""}`);
 }
 const trade=async(id,dir)=>{const shares=tradeShares,r=await act("trade",{stockId:id,dir,shares});if(r){me={...me,cash:r.cash,hold:r.hold};say(`已${dir>0?"買入":"賣出"} ${shares} 股${stocks[id]?.name||""}`);render();}};
 // 上漲機率只有開發者看得到：資料放在伺服器的私密文件，開發者才能用 /odds 取得（一般玩家的瀏覽器裡根本沒有這些資料）
@@ -184,27 +127,18 @@ function renderStrip(){
   const chip=(ok,label,on)=>el("button",{class:"chip "+(ok?"ok":"todo"),type:"button",onclick:on},el("i",{class:"dot","aria-hidden":"true"}),el("span",{text:label}));
   s.append(
     chip(!!user,user?"Google："+(user.displayName||user.email||"已登入"):"以 Google 帳號登入",()=>{if(user){if(confirm("登出 Google？"))signOut(auth);}else gLogin();}),
-    chip(!!token,token?"工坊："+(profile?.workshopName||"已連結"):"連結《無限煉製》帳號",()=>{if(token){if(confirm("中斷《無限煉製》連線？"))logoutIA();}else login();}),
     el("div",{class:"stat"},el("span",{class:"k",text:"現金 "}),el("b",{text:fmt(me.cash)}),el("span",{class:"k",text:"　淨資產 "}),el("b",{text:fmt(net())})),
     ...(me.jailUntil>Date.now()?[el("div",{class:"cell debt",text:"⛓ 服刑中・剩 "+prisonLeft(me.jailUntil)})]:[]));
 }
 let craftSig="";
 function renderCraft(){
-  const sig=JSON.stringify([!!token,isDev,inv.map(x=>x.name),Object.keys(me.used||{}),item&&item.name,busy]);
+  const sig=JSON.stringify([isDev,me.inv||{},Object.keys(stocks).length,busy]);
   if(sig===craftSig)return;craftSig=sig;
-  const w=$("craft");w.replaceChildren(winBar("📦 CREATION.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
-  const b=el("div",{class:"body"});
-  if(!token&&!isDev){b.append(el("p",{class:"mu",text:"先連結《無限煉製》帳號，才能挑選 24 小時內做出的造物來投入。"}));}
-  if(token){
-    const sel=el("select",{class:"px-sel","aria-label":"選擇要投入的造物"});
-    sel.append(new Option(inv.length?"▼ 選擇 24 小時內做出的造物":"24 小時內沒有新做出的造物",""));
-    inv.forEach((x,i)=>{const u=usedBefore(x.name),o=new Option(`${x.name}（${u?"已投入過":"剩 "+left(x.at)}）`,String(i));o.disabled=!!u;sel.append(o);});
-    sel.value=item&&inv.includes(item)&&!usedBefore(item.name)?String(inv.indexOf(item)):"";
-    sel.onchange=()=>{item=inv[sel.value]||null;};
-    b.append(sel,el("p",{class:"mu",text:"每個造物只能投入一次，不能重複；選好後，到想影響的股票視窗按「投入造物」。"}));
-  }
-  if(isDev)b.append(el("label",{class:"lbl",for:"devitem",text:"🛠 開發者：自己打字輸入造物（有填就優先使用，不需要連結《無限煉製》）"}),
-    el("input",{class:"px-in",id:"devitem",type:"text",maxlength:"60",autocomplete:"off",placeholder:"例如：蒸氣龍",value:devText,oninput:e=>{devText=e.target.value;}}));
+  const w=$("craft");w.replaceChildren(winBar("📦 BACKPACK.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
+  const b=el("div",{class:"body"}),have=ELEM_IDS.filter(id=>invCount(id)>0);
+  b.append(have.length?el("div",{class:"chips"},...have.map(id=>el("span",{class:"echip",text:`${elemIcon(id)} ${elemName(id)} ×${invCount(id)}`}))):el("p",{class:"mu",text:user?"背包是空的。到練金工坊買基礎元素（火、水、土、風）或三物合成蒸氣、雷。":"登入後就能買元素、合成，再投入同名股票。"}));
+  if(isDev)b.append(el("p",{class:"mu",text:"🛠 開發者：投入元素不需要材料。"}));
+  b.append(el("div",{class:"row"},el("button",{class:"px-btn pri",type:"button",text:"⚗ 前往練金工坊",onclick:()=>setView("work")}),el("span",{class:"mu",text:"元素合成好後，到想影響的股票視窗按「投入元素」。"})));
   w.append(b);
 }
 function renderMarket(){
@@ -219,7 +153,7 @@ function renderMarket(){
   const ids=Object.keys(stocks).sort();
   if(!ids.length){mk.append(el("p",{class:"mu",text:"行情載入中…"}));return;}
   for(const id of ids){
-    const s=stocks[id],task=dailyTasks.date===taipeiDate()?dailyTasks.tasks?.[id]:null,open=!collapsed.has(id),first=(s.p&&s.p[0])||s.price,ch=(s.price/first-1)*100,chTxt=(ch>=0?"+":"")+ch.toFixed(2)+"%";
+    const s=stocks[id],open=!collapsed.has(id),first=(s.p&&s.p[0])||s.price,ch=(s.price/first-1)*100,chTxt=(ch>=0?"+":"")+ch.toFixed(2)+"%";
     const n=me.hold?.[id]||0;
     const w=el("section",{class:"win stock"+(open?"":" shut"),"aria-label":s.name});
     w.append(winBar(`${s.emoji} ${id.toUpperCase()}.EXE`,[
@@ -231,13 +165,12 @@ function renderMarket(){
     b.append(
       el("div",{class:"hd"},el("span",{class:"nm",text:s.name}),el("span",{class:"px big",text:fmt(s.price)}),el("span",{class:"chg "+(ch>=0?"up":"dn"),text:chTxt})),
       chart(s),
-      ...(task?[el("div",{class:"daily-task"},el("b",{text:"今日指定造物："+task.item}),el("span",{text:task.description}))]:[]),
       ...(isDev&&odds?[el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率 🔒"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{class:"gi","data-id":id,style:`width:${upPct(id)}%`})),el("b",{class:"gp","data-id":id,text:upPct(id)+"%"}))]:[]),
-      el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}`}),
+      el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}｜背包${isDev?"（開發者免材料）":" "+invCount(id)+" 個"}`}),
       el("div",{class:"acts"},
         el("button",{class:"px-btn buy-btn",type:"button",disabled:busy,text:`買 ${tradeShares}`,onclick:()=>trade(id,1)}),
         el("button",{class:"px-btn sell-btn",type:"button",disabled:busy,text:`賣 ${tradeShares}`,onclick:()=>trade(id,-1)}),
-        el("button",{class:"px-btn pri",type:"button",disabled:busy,text:"投入造物",onclick:()=>inject(id)})));
+        el("button",{class:"px-btn pri",type:"button",disabled:busy||(!isDev&&invCount(id)<1),text:`投入${s.name}元素`,onclick:()=>inject(id)})));
     w.append(b);mk.append(w);
   }
 }
@@ -330,10 +263,9 @@ function buildNewsForm(host){
 function buildDeveloperGameSettings(host){
   const input=(id,label,value)=>{const field=el("input",{class:"px-in",type:"number",min:"0",max:"100",step:"0.1",value:String(value),id,"aria-label":label});return [el("label",{class:"lbl",for:id,text:label}),field];};
   const [loanLabel,loan]=input("cfg-loan","借款日利率（%）",gameSettings.loanRate*100),[demLabel,dem]=input("cfg-dem","活存日利率（%）",gameSettings.demRate*100),[tdLabel,td]=input("cfg-td","定存日利率（%）",gameSettings.tdRate*100);
-  const [thLabel,th]=input("cfg-threshold","造物相似度門檻（%）",gameSettings.threshold);th.step="1";
   const section=el("section",{class:"win","aria-label":"開發者遊戲設定"});
-  section.append(winBar("⚙ GAME SETTINGS.EXE"),el("div",{class:"body"},el("p",{class:"mu",text:"僅開發者可見。利率以日為單位連續複利；造物門檻為 1–99 的整數百分比。"}),loanLabel,loan,demLabel,dem,tdLabel,td,thLabel,th,
-    el("button",{class:"px-btn pri",type:"button",text:"儲存遊戲設定",disabled:busy,onclick:async()=>{const r=await act("admin-settings",{action:"save",loanRate:Number(loan.value),demRate:Number(dem.value),tdRate:Number(td.value),threshold:Number(th.value)});if(r){gameSettings=r.settings;bankBuilt=false;say("遊戲設定已更新");}}})));
+  section.append(winBar("⚙ GAME SETTINGS.EXE"),el("div",{class:"body"},el("p",{class:"mu",text:"僅開發者可見。利率以日為單位連續複利。"}),loanLabel,loan,demLabel,dem,tdLabel,td,
+    el("button",{class:"px-btn pri",type:"button",text:"儲存遊戲設定",disabled:busy,onclick:async()=>{const r=await act("admin-settings",{action:"save",loanRate:Number(loan.value),demRate:Number(dem.value),tdRate:Number(td.value),threshold:gameSettings.threshold});if(r){gameSettings=r.settings;bankBuilt=false;say("遊戲設定已更新");}}})));
   host.append(section);
 }
 async function loadScheduledNews(){
@@ -431,22 +363,45 @@ function updateBank(){
   bk.times.textContent=me.bankrupt>0?`你被黑道找上過 ${me.bankrupt} 次。`:"";
   bk.bail.hidden=!(me.jailUntil>Date.now());bk.b1.disabled=bk.b2.disabled=bk.b3.disabled=busy;bk.b2.disabled=busy||o<.005;bk.b3.disabled=busy||o<.005;
 }
-// ---------- 練金工坊 ----------
+// ---------- 練金工坊：買基礎元素、三物合成 ----------
+let slots=[null,null,null],buyQty=1,craftMsg=null;
 function renderWork(){
   const v=$("v-work");v.replaceChildren();
-  const w=el("section",{class:"win","aria-label":"練金工坊"});
-  w.append(winBar("⚗ WORKSHOP.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
-  const b=el("div",{class:"body"});
-  b.append(el("p",{class:"warn",text:"這裡目前只讀取你在《無限煉製》的合成紀錄，列出 24 小時內做出的造物。代為合成需要官方提供的合成介面，尚未接上。"}));
-  b.append(el("h2",{class:"h2",text:"你 24 小時內做出的造物"}));
-  if(!token)b.append(el("p",{class:"mu",text:"連結《無限煉製》帳號後，這裡會列出你做出的造物，以及哪些還能投入股票。"}));
-  else if(!inv.length)b.append(el("p",{class:"mu",text:"24 小時內沒有新做出的造物。到遊戲裡煉成新東西吧！"}));
-  else{const ul=el("ul",{class:"list"});
-    inv.forEach(x=>{const u=usedBefore(x.name);ul.append(el("li",{},el("span",{class:u?"off":"",text:x.name}),el("span",{class:"mu",text:u?"已投入過":"剩 "+left(x.at)+"・可投入"})));});
-    b.append(ul);}
-  w.append(b);v.append(w);
+  const used=id=>slots.filter(x=>x===id).length,left=id=>invCount(id)-used(id);
+  const chip=(id,onclick,extra="")=>el("button",{type:"button",class:"echip btn",disabled:busy||!onclick,"aria-label":`${elemName(id)}${extra}`,onclick,text:`${elemIcon(id)} ${elemName(id)}${extra}`});
+  // 1. 背包
+  const bag=el("section",{class:"win","aria-label":"背包"});bag.append(winBar("📦 BACKPACK.EXE"));
+  const have=ELEM_IDS.filter(id=>invCount(id)>0),bb=el("div",{class:"body"});
+  bb.append(el("p",{class:"mu",text:"點背包裡的元素，放進下面的合成格；每個元素只能用一次（合成或投入股票都會消耗）。"}));
+  bb.append(have.length?el("div",{class:"chips"},...have.map(id=>chip(id,left(id)>0?()=>{const i=slots.indexOf(null);if(i<0)return say("三個格子都放滿了，先拿掉一個或按「合成」");slots[i]=id;renderWork();}:null,` ×${left(id)}`))):el("p",{class:"mu",text:user?"背包是空的，先到下面的材料店買基礎元素。":"請先登入 Google 帳號。"}));
+  bag.append(bb);v.append(bag);
+  // 2. 材料店
+  const shop=el("section",{class:"win","aria-label":"材料店"});shop.append(winBar("🛒 SHOP.EXE"));
+  const qty=el("input",{class:"px-in qty-in",type:"number",inputmode:"numeric",min:"1",max:"100",step:"1",value:String(buyQty),"aria-label":"購買數量",oninput:e=>{const n=Math.floor(Number(e.target.value));if(n>=1&&n<=100){buyQty=n;shop.querySelectorAll(".buy-el").forEach(b=>b.dataset.n=String(n));shop.querySelector(".cost").textContent=`${n*BASE_PRICE} 元`;}}});
+  shop.append(el("div",{class:"body"},el("p",{class:"mu",text:`基礎元素：火、水、土、風，一個 ${BASE_PRICE} 元。蒸氣與雷不能買，只能合成。`}),
+    el("div",{class:"row mono-row"},el("label",{class:"lbl",text:"數量"}),qty,el("span",{class:"mu"},document.createTextNode("花費 "),el("b",{class:"cost",text:`${buyQty*BASE_PRICE} 元`}))),
+    el("div",{class:"chips"},...BASIC_IDS.map(id=>el("button",{type:"button",class:"px-btn buy-el",disabled:busy||!user,text:`買 ${elemIcon(id)} ${elemName(id)}`,onclick:async()=>{const n=buyQty,r=await act("craft",{action:"buy",element:id,qty:n});if(r)say(`買了 ${n} 個${elemName(id)}，花 ${r.cost} 元`);}})))));
+  v.append(shop);
+  // 3. 三物合成
+  const lab=el("section",{class:"win","aria-label":"三物合成"});lab.append(winBar("⚗ ALCHEMY.EXE"));
+  const filled=slots.every(Boolean),lb=el("div",{class:"body"});
+  lb.append(el("p",{class:"mu",text:"放入 3 個元素合成 1 個新元素，結果可能是蒸氣或雷。多試試看，發現的配方會記在配方簿裡。"}));
+  lb.append(el("div",{class:"slots"},...slots.map((id,i)=>el("button",{type:"button",class:"slot"+(id?" on":""),"aria-label":id?`第 ${i+1} 格：${elemName(id)}，點一下拿掉`:`第 ${i+1} 格：空的`,onclick:()=>{if(id){slots[i]=null;renderWork();}},text:id?`${elemIcon(id)}\n${elemName(id)}`:"＋"})),
+    el("span",{class:"arrow","aria-hidden":"true",text:"→"}),el("div",{class:"slot out","aria-live":"polite",text:craftMsg?`${elemIcon(craftMsg.result)}\n${elemName(craftMsg.result)}`:"？"})));
+  lb.append(el("div",{class:"row"},
+    el("button",{type:"button",class:"px-btn pri",disabled:busy||!filled||!user,text:"⚗ 合成",onclick:async()=>{const items=[...slots],r=await act("craft",{action:"craft",items});if(r){slots=[null,null,null];craftMsg={result:r.result};say(`合成成功：得到 1 個「${elemName(r.result)}」${r.isNew?"（新發現的配方！）":""}`);renderWork();}}}),
+    el("button",{type:"button",class:"px-btn",disabled:busy||slots.every(x=>!x),text:"清空",onclick:()=>{slots=[null,null,null];craftMsg=null;renderWork();}})));
+  if(craftMsg)lb.append(el("p",{class:"mu",text:`上一次合成得到：${elemIcon(craftMsg.result)} ${elemName(craftMsg.result)}。到交易區的「${elemName(craftMsg.result)}」股票視窗按「投入${elemName(craftMsg.result)}元素」，就會提高它的上漲機率。`}));
+  lab.append(lb);v.append(lab);
+  // 4. 配方簿
+  const book=el("section",{class:"win","aria-label":"配方簿"});book.append(winBar("📖 RECIPES.EXE"));
+  const recs=Object.entries(me.recipes||{}).sort(),rb=el("div",{class:"body"});
+  rb.append(recs.length?el("ul",{class:"list"},...recs.map(([k,res])=>el("li",{},el("span",{text:k.split("+").map(id=>`${elemIcon(id)}${elemName(id)}`).join(" ＋ ")}),el("b",{text:`→ ${elemIcon(res)} ${elemName(res)}`})))):el("p",{class:"mu",text:"還沒有發現任何配方。"}));
+  rb.append(el("p",{class:"mu",text:`投入股票的效果：基礎元素（火水土風）是蒸氣與雷的一半；蒸氣與雷滿額。每次投入都有幾秒冷卻，總偏移有上限，而且會慢慢消退。`}));
+  book.append(rb);v.append(book);
 }
 // ---------- 設定（介面大小） ----------
+const RULE_TEXT="股價會自己隨機漲跌。到「練金工坊」買基礎元素（火、水、土、風，各 10 元），或把三個元素合成（蒸氣、雷只能合成），再回到這裡把元素投入同名股票：會提高它的上漲機率（基礎元素一半、蒸氣與雷滿額），效果會慢慢消退，每個元素只能用一次。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力：影響大小看你買賣的股數占全服持股的比例，賣掉大部分持股會重創，買賣 1 股幾乎沒有影響。";
 const SCALES={s:["小",.9],m:["中",1],l:["大",1.2]};
 let scaleKey="m";
 try{const k=localStorage.getItem("ui");if(SCALES[k])scaleKey=k;}catch{}
@@ -463,9 +418,7 @@ function renderSet(){
   const body=el("div",{class:"body"},el("h2",{class:"h2",text:"玩家名稱"}),el("p",{class:"mu",text:user?"排行榜會顯示這個名稱；留空不允許。最多 20 字。":"登入後即可設定排行榜顯示名稱。"}),pname,saveName,
     el("h2",{class:"h2",text:"介面大小"}),seg,
     el("h2",{class:"h2",text:"新聞跑馬燈"}),el("p",{class:"mu",text:"有新聞發布時，頁面最上方會滾動顯示標題。"}),
-    el("div",{class:"seg",role:"group","aria-label":"新聞跑馬燈"},...[[true,"開啟"],[false,"關閉"]].map(([on,name])=>el("button",{class:"px-btn",type:"button","aria-pressed":String(on===!tickerOff),text:name,onclick:()=>setTicker(on)}))),
-    el("h2",{class:"h2",text:"Google API Key"}),el("p",{class:"mu",text:"AI 判定造物時使用你自己的 Key；也可以按右上角的 ⚙。"}),
-    el("button",{class:"px-btn",type:"button",text:"開啟 API 設定",onclick:()=>$("settings").showModal()}));
+    el("div",{class:"seg",role:"group","aria-label":"新聞跑馬燈"},...[[true,"開啟"],[false,"關閉"]].map(([on,name])=>el("button",{class:"px-btn",type:"button","aria-pressed":String(on===!tickerOff),text:name,onclick:()=>setTicker(on)}))));
   w.append(body);
   v.append(w);
 }
@@ -489,8 +442,8 @@ function setView(v){
 }
 function render(){
   renderTicker();
-  const rule=document.querySelector(".rule");if(rule)rule.textContent=`股價會自己隨機漲跌。AI 會替造物評出與股票主題的相似度（0–100）：超過目前 ${gameSettings.threshold}% 門檻才算相關，會提高上漲機率；低於門檻會提高下跌機率（越接近門檻影響越小），效果會慢慢消退。每個造物只能投入一次，不能重複。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力：影響大小看你買賣的股數占全服持股的比例，賣掉大部分持股會重創，買賣 1 股幾乎沒有影響。`;
-  if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：可以在造物視窗直接打字輸入造物名稱":!token?"買賣與銀行可以直接玩；連結《無限煉製》帳號才能投入造物":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"選一個 24 小時內做出的造物，再到想影響的股票視窗按「投入造物」":"";
+  const rule=document.querySelector(".rule");if(rule)rule.textContent=RULE_TEXT;
+  if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：投入元素不需要材料":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"先到「練金工坊」準備元素，再到想影響的股票視窗按「投入元素」":"";
   if(me.jailUntil>Date.now())$("msg").textContent="你目前正在服刑，剩餘 "+prisonLeft(me.jailUntil)+"；服刑期間不能進行遊戲操作，但可以到銀行借貸保釋。";
   renderStrip();
   if(view==="trade"){
@@ -567,30 +520,24 @@ function wireNav(){
 }
 function renderFeed(rows){
   const f=$("feed");f.replaceChildren();
-  if(!rows.length)f.append(el("div",{class:"mu",text:"還沒有人投入造物"}));
+  if(!rows.length)f.append(el("div",{class:"mu",text:"還沒有人投入元素"}));
   rows.forEach(x=>{const t=x.at?.toDate?.();const hm=t?t.toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false}):"";
     if(x.mob){f.append(el("div",{class:"mob"},document.createTextNode(`☠ ${x.who} 欠款 ${fmt(x.owed)} 拖過一天，被黑道抓走關押一天，資產重製`)));return;}
     if(x.robbery){f.append(el("div",{class:x.caught?"dn":"up"},el("span",{class:"tm",text:hm}),document.createTextNode(`🕶 ${x.who} ${x.caught?"在黑市行動中被捕並關押一天":"完成了一次黑市行動"}`)));return;}
+    if(x.element){f.append(el("div",{class:"up"},el("span",{class:"tm",text:hm}),document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」元素投入 ${x.stock}（${x.tier==="crafted"?"高階，滿額":"基礎，一半"}）`)));return;}
     f.append(el("div",{class:(x.pass!=null?x.pass:x.pct!=null?x.pct>0:x.score>=50)?"up":"dn"},el("span",{class:"tm",text:hm}),
       document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：相似度 ${x.score}${x.pass!=null?(x.pass?" ✓":" ✗"):""}${x.pct!=null?"，"+(x.pct>0?"+":"")+x.pct+"%":""}`)));});
 }
 function wireSettings(){
-  const dlg=$("settings"),k=$("gkey"),upd=()=>{$("keystate").textContent=K.getItem("gk")?(K.persistent?"✓ 已設定（存在這台裝置，下次不用重打）":"✓ 已設定（只存在這個分頁；這個瀏覽器不允許長期儲存）"):"尚未設定";};
-  k.value=K.getItem("gk")||"";$("model").textContent=CFG.modelLabel;upd();
-  if(K.persistent)document.querySelectorAll("#settings .mu").forEach(p=>{if(p.textContent.includes("只存在這個分頁"))p.textContent="Key 存在這台裝置的瀏覽器裡（下次不用重打），按「清除 Key」可刪除；每次投入時隨請求送到伺服器轉呼叫 Gemini，伺服器不儲存、不記錄。共用的手機或電腦請記得清除。";});
-  $("gear").onclick=()=>dlg.showModal();
+  $("gear").onclick=()=>setView("set");
   $("mode").onclick=()=>setView(view==="mono"?"trade":"mono");
-  $("close").onclick=()=>dlg.close();
-  dlg.addEventListener("click",e=>{if(e.target===dlg)dlg.close();});
-  k.onchange=()=>{K.setItem("gk",k.value.trim());upd();};
-  $("clearkey").onclick=()=>{K.removeItem("gk");k.value="";upd();};
 }
 
 // ---------- 啟動 ----------
 async function main(){
   applyScale();wireSettings();wireNav();marketOpenPrev=marketOpenClient();
   setView({"#mono":"mono","#news":"news","#rank":"rank","#black":"black","#analyst":"analyst","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
-  if([CFG.firebase.apiKey,CFG.ia.clientId,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase、Client ID 與 Worker 網址");return;}
+  if([CFG.firebase.apiKey,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase 與 Worker 網址");return;}
   const app=initializeApp(CFG.firebase);db=getFirestore(app);if(view==="mono")monoSub(true);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
   onAuthStateChanged(auth,u=>{
@@ -600,12 +547,10 @@ async function main(){
     else me={cash:CFG.startCash,hold:{},name:"訪客"};
     render();
   });
-  await handleCallback();
   onSnapshot(doc(db,"market","state"),snap=>{
     if(!snap.exists()){fetch(CFG.api+"/ensure-market",{method:"POST"}).catch(()=>{});return;}
     stocks=snap.data().stocks||{};dailyTasks=snap.data().dailyTasks||{date:"",tasks:{}};render();});
   onSnapshot(query(collection(db,"news"),orderBy("at","desc"),limit(30)),snap=>{newsList=[];snap.forEach(d=>newsList.push({id:d.id,...d.data()}));newsErr=false;render();},()=>{newsErr=true;render();});
   onSnapshot(query(collection(db,"feed"),orderBy("at","desc"),limit(15)),snap=>{const rows=[];snap.forEach(d=>rows.push(d.data()));renderFeed(rows);});
-  if(token)loadIA().then(render).catch(e=>say(e.message));
 }
 main();
