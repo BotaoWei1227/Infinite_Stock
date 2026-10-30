@@ -219,9 +219,10 @@ async function strikeIfDue(d,pid,p){
 }
 // 開發者：以 Google 驗證過的信箱比對（名單在機密 DEV_EMAILS），投入元素不需要材料
 const isDev=(d,a)=>a.emailVerified===true&&typeof a.email==="string"&&(d.devEmails||[]).includes(a.email.toLowerCase());
-const elementOf=(stocks,id)=>stocks?.[id]?.name||id;
-// 投入元素：消耗 1 個同名元素，提高該股票的上漲機率（基礎元素一半、蒸氣與雷滿額）。不直接改價格
-async function inject(d,a,{stockId}={}){
+const sha=async t=>[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(t)))].map(b=>b.toString(16).padStart(2,"0")).join("").slice(0,40);
+// 投入物品：消耗背包裡 1 個物品，投入任何一檔股票。AI 判斷「物品和這檔股票的主題有多相關」（同一組只判一次，結果記在私密集合 judged），
+// 相關度高過門檻 → 提高上漲機率，沒高過 → 反而壓低；品階越高力道越大。不直接改價格
+async function inject(d,a,{stockId,item}={}){
   if(!/^[a-z]{2,20}$/.test(stockId||"")||!L.ELEMENTS.includes(stockId))throw bad("參數錯誤");
   const dev=isDev(d,a),pid=`players/${a.uid}`;
   return retry(async()=>{
@@ -230,55 +231,83 @@ async function inject(d,a,{stockId}={}){
     const stocks=m?.data.stocks,s=stocks?.[stockId];
     if(!s)throw new HttpError(404,"not-found","找不到這檔股票");
     if(p&&d.now()-(p.data.lastInjectAt||0)<COOLDOWN)throw new HttpError(429,"resource-exhausted","投入太頻繁，請稍候幾秒");
-    const inv={...(p?.data.inv||{})};
-    if(!dev){if(!(Number(inv[stockId])>=1))throw new HttpError(409,"failed-precondition",`你沒有「${s.name}」元素，先到練金工坊買基礎元素或三物合成`);inv[stockId]=Number(inv[stockId])-1;}
-    const now=d.now(),bias=L.injectNudge(L.effOdds(o.data.bias?.[stockId],now),stockId);   // 只改變上漲機率；價格由排程隨機走
+    const inv=L.normInv(p?.data.inv);let name=L.normName(item),lv=1,e=s.emoji||"";
+    if(dev){name=name||s.name;if(!L.validName(name))throw bad("物品名稱不合法");if(inv[name]){lv=inv[name].lv;e=inv[name].e;}}   // 開發者不需要材料，可以直接打字輸入任何物品名稱
+    else{
+      const it=inv[name];if(!it)throw new HttpError(409,"failed-precondition",`背包裡沒有「${name||"?"}」，先到練金工坊買基礎元素或三物合成`);
+      lv=it.lv;e=it.e;it.n-=1;if(it.n<=0)delete inv[name];
+    }
+    // 相關度：先查快取，沒有才問 AI；沒設定 AI 時，物品名稱和股票名稱相同才算直接相關
+    const jp=`judged/${await sha(name+"|"+stockId)}`,jd=await d.db.get(jp),extra=[];let rel,score;
+    if(jd&&L.REL_RANGE[jd.data.rel]){rel=jd.data.rel;score=L.relScore(rel,jd.data.score);}
+    else if(d.judgeAI){
+      let v;try{v=await d.judgeAI({item:name,stock:{id:stockId,name:s.name}});}
+      catch(err){console.error("judge failed",err?.message);throw new HttpError(503,"unavailable","AI 暫時沒辦法判定，物品沒有扣，請稍後再試");}
+      rel=v.rel;score=L.relScore(v.rel,v.score);extra.push({path:jp,data:{i:name,s:stockId,rel,score},pre:jd?jd.version:null});
+    }else{rel=name===s.name?"direct":"none";score=rel==="direct"?100:5;}
+    const now=d.now(),cfg=settingsOf(o),pass=L.passes(score,cfg.threshold);
+    const bias=L.injectNudge(L.effOdds(o.data.bias?.[stockId],now),score,lv,cfg.threshold);   // 只改變上漲機率；價格由排程隨機走
     const up=Math.round(L.upProb(bias+L.eventShift(o.data.events,stockId,now))*100);
-    const who=p?.data.customName||(dev?(a.name||"開發者"):(p?.data.name||a.name||"玩家")),tier=L.INJECT_POWER[stockId]>=1?"crafted":"basic";
+    const who=p?.data.customName||(dev?(a.name||"開發者"):(p?.data.name||a.name||"玩家")),label=`${e}${name}`;
     await d.db.commit([
-      {path:MP,data:{stocks:{...stocks,[stockId]:{...s,last:`${s.emoji||""}${s.name} 元素`}}},ts:["updatedAt"],pre:m.version},
+      {path:MP,data:{stocks:{...stocks,[stockId]:{...s,last:label}}},ts:["updatedAt"],pre:m.version},
       {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:bias,at:now}}},pre:o.version},
       {path:pid,data:{...(p?{}:{cash:START,hold:{}}),name:p?.data.name||a.name||"玩家",lastInjectAt:now,...(dev?{}:{inv})},pre:p?p.version:null},
-      {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:`${s.emoji||""}${s.name}`,element:true,tier,...(dev?{dev:true}:{})},ts:["at"],pre:null}]);
-    // 機率只有開發者看得到：一般玩家的回應不含 up
-    return {ok:true,price:s.price,tier,left:Number(inv[stockId]||0),...(dev?{up}:{})};
+      {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:label,element:true,rel,pass,...(dev?{dev:true}:{})},ts:["at"],pre:null},...extra]);
+    // 機率只有開發者看得到：一般玩家的回應只有相關程度，不含機率與分數
+    return {ok:true,price:s.price,rel,pass,lv,left:dev?0:Number(inv[name]?.n||0),...(dev?{up,score}:{})};
   });
 }
-// 練金工坊：買基礎元素（buy）、三物合成（craft）。元素放在玩家文件的 inv，已發現的配方放在 recipes
-const MAX_BUY=100,RECIPES="secret/recipes";   // RECIPES：AI 判定過的合成結果（私密，客戶端讀不到）
+// 練金工坊：買基礎元素（buy）、三物合成（craft）。背包 inv：{物品名稱:{n,e,lv}}；已發現的配方放在 recipes
+const MAX_BUY=100,REGISTRY="secret/items",MAX_DEFS=3000;   // REGISTRY：AI 創造過的物品名稱→{e,lv}（私密）。每個配方結果存在 recipes/{雜湊}（私密）
+const BASE_BY_NAME=Object.fromEntries(Object.entries(L.BASE_ITEMS).map(([id,x])=>[x.name,id]));
+// 沒有 AI 時的固定配方：三個都是基礎名稱 → 照元素規則；否則得到材料裡品階最高的那個
+function fallbackResult(defs){
+  const ids=defs.map(x=>BASE_BY_NAME[x.name]);
+  if(ids.every(Boolean))return {name:L.BASE_ITEMS[L.craftResult(ids)].name,...(({e,lv})=>({e,lv}))(L.BASE_ITEMS[L.craftResult(ids)])};
+  const top=[...defs].sort((x,y)=>y.lv-x.lv||(x.name<y.name?-1:1))[0];return {name:top.name,e:top.e,lv:top.lv};
+}
 async function craft(d,a,{action,element,qty,items}={}){
   if(!["buy","craft"].includes(action))throw bad("參數錯誤");
   const pid=`players/${a.uid}`;
   return retry(async()=>{
     const p=await d.db.get(pid);await strikeIfDue(d,pid,p);
-    const inv={...(p?.data.inv||{})},cash0=Math.round(Number(p?.data.cash??START)*100)/100,base=p?{}:{hold:{},name:a.name||"玩家"};
+    const inv=L.normInv(p?.data.inv),cash0=Math.round(Number(p?.data.cash??START)*100)/100,base=p?{}:{hold:{},name:a.name||"玩家"};
     if(action==="buy"){
       if(!L.BASICS.includes(element)||!Number.isInteger(qty)||qty<1||qty>MAX_BUY)throw bad(`只能買火、水、土、風，一次 1～${MAX_BUY} 個`);
       const cost=L.BASE_PRICE*qty;if(cash0<cost)throw new HttpError(409,"failed-precondition",`現金不足，${qty} 個要 ${cost} 元`);
-      inv[element]=Number(inv[element]||0)+qty;const cash=Math.round((cash0-cost)*100)/100;
+      const b=L.BASE_ITEMS[element];inv[b.name]={n:Number(inv[b.name]?.n||0)+qty,e:b.e,lv:b.lv};const cash=Math.round((cash0-cost)*100)/100;
       await d.db.commit([{path:pid,data:{...base,cash,inv},pre:p?p.version:null}]);
       return {ok:true,cash,inv,cost};
     }
-    let ruleResult;try{ruleResult=L.craftResult(items);}catch(e){throw bad(e.message);}   // 檢查三個都是元素；也是沒有 AI 時的固定配方
+    if(!Array.isArray(items)||items.length!==3||items.some(x=>typeof x!=="string"||!L.validName(x)))throw bad("三物合成需要選 3 個物品");
     const need={};for(const x of items)need[x]=(need[x]||0)+1;
-    for(const [e,n] of Object.entries(need))if(Number(inv[e]||0)<n)throw new HttpError(409,"failed-precondition",`元素不夠：需要 ${n} 個「${e}」，你只有 ${Number(inv[e]||0)} 個`);
-    // 結果交給 AI 判定：同一個組合只問一次，結果記在私密文件 secret/recipes，之後所有玩家都得到一樣的結果
-    const key=L.recipeKey(items),extra=[];let result=ruleResult,reason="",byAI=false;
+    for(const [n,c] of Object.entries(need))if(Number(inv[n]?.n||0)<c)throw new HttpError(409,"failed-precondition",`物品不夠：需要 ${c} 個「${n}」，你只有 ${Number(inv[n]?.n||0)} 個`);
+    const defs=items.map(n=>({name:n,e:inv[n].e,lv:inv[n].lv})),maxLv=Math.max(...defs.map(x=>x.lv));
+    const key=L.itemKey(items),extra=[];let result=fallbackResult(defs),reason="",byAI=false;
     if(d.craftAI){
-      const cd=await d.db.get(RECIPES),hit=cd?.data.book?.[key];
-      if(hit&&L.ELEMENTS.includes(hit.r)){result=L.noDowngrade(items,hit.r);reason=result===hit.r?(hit.w||""):"進階元素的力量沒有消退，依舊保持原本的位階。";byAI=true;}   // 舊快取若有降級的結果也會被擋下
+      const rp=`recipes/${await sha(key)}`,rd=await d.db.get(rp),h=rd?.data;
+      if(h&&L.validName(h.n)&&Number.isInteger(h.lv)){result={name:h.n,e:h.e,lv:h.lv};reason=h.w||"";}
       else{
-        let v;try{v=await d.craftAI([...items].sort((a,b)=>L.ELEMENTS.indexOf(a)-L.ELEMENTS.indexOf(b)));}
+        const reg=await d.db.get(REGISTRY),regDefs={...(reg?.data.defs||{})},recent=[...(reg?.data.recent||[])];
+        let v;try{v=await d.craftAI({items:[...defs].sort((x,y)=>x.name<y.name?-1:1),avoid:[...recent]});}
         catch(e){console.error("craft judge failed",e?.message);throw new HttpError(503,"unavailable","煉金師暫時沒辦法判定這個組合，材料沒有扣，請稍後再試");}
-        result=v.result;reason=v.reason||"";byAI=true;
-        extra.push({path:RECIPES,data:{book:{...(cd?.data.book||{}),[key]:{r:result,w:reason}}},pre:cd?cd.version:null});
+        let {name,e,lv}=v;reason=v.reason||"";
+        const baseId=BASE_BY_NAME[name],known=regDefs[name];
+        if(baseId){e=L.BASE_ITEMS[baseId].e;lv=L.BASE_ITEMS[baseId].lv;}                // 基礎名稱固定圖示與品階
+        else if(known){e=known.e;lv=known.lv;}                                           // 同名物品沿用已登記的圖示與品階
+        else lv=Math.max(maxLv,Math.min(lv,maxLv+1,L.MAX_LV));                           // 新物品：品階不低於材料（不降級），最多高 1 級
+        result={name,e,lv};
+        if(!baseId&&!known){if(Object.keys(regDefs).length<MAX_DEFS)regDefs[name]={e,lv};recent.push(name);}
+        extra.push({path:rp,data:{n:name,e,lv,w:reason,k:key},pre:null},{path:REGISTRY,data:{defs:regDefs,recent:recent.slice(-40)},pre:reg?reg.version:null});
       }
+      byAI=true;
     }
-    for(const [e,n] of Object.entries(need)){inv[e]=Number(inv[e])-n;if(inv[e]<=0)delete inv[e];}
-    inv[result]=Number(inv[result]||0)+1;
-    const recipes={...(p?.data.recipes||{})},isNew=!Object.hasOwn(recipes,key);recipes[key]=result;
+    for(const [n,c] of Object.entries(need)){inv[n]={...inv[n],n:inv[n].n-c};if(inv[n].n<=0)delete inv[n];}
+    inv[result.name]={n:Number(inv[result.name]?.n||0)+1,e:result.e,lv:result.lv};
+    const recipes={...(p?.data.recipes||{})},isNew=!Object.hasOwn(recipes,key);recipes[key]={n:result.name,e:result.e,lv:result.lv,i:[...defs].sort((x,y)=>x.name<y.name?-1:1).map(x=>x.e)};
     await d.db.commit([{path:pid,data:{...base,inv,recipes,crafts:Number(p?.data.crafts||0)+1},pre:p?p.version:null},...extra]);
-    return {ok:true,result,reason,byAI,recipe:key,isNew,inv,recipes};
+    return {ok:true,result:{name:result.name,e:result.e,lv:result.lv},reason,byAI,recipe:key,isNew,inv,recipes};
   });
 }
 // 全服持股（各股票所有玩家持有股數的總和）記在私密文件的 float；第一次沒有紀錄時，掃描一次玩家資料建立

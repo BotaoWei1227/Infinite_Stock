@@ -48,7 +48,7 @@ test("買賣",()=>{
   assert.throws(()=>trade({cash:1e9,hold:{}},"fire",12,1,0),/整數/);assert.throws(()=>trade({cash:1e9,hold:{}},"fire",12,1,2.5),/整數/);
   assert.throws(()=>trade({cash:1e9,hold:{}},"fire",12,1,100001),/整數/);
 });
-import {ELEMENTS,BASICS,BASE_PRICE,INJECT_POWER,injectNudge,recipeKey,craftResult,INJECT_MAX as IM,BIAS_CAP as BC} from "../src/logic.js";
+import {ELEMENTS,BASICS,BASE_PRICE,injectNudge,relScore,REL_RANGE,LV_POWER,MAX_LV,normInv,validName,normName,itemKey,recipeKey,craftResult,INJECT_MAX as IM,BIAS_CAP as BC} from "../src/logic.js";
 test("三物合成：配方規則（雷＞蒸氣＞多數決）；順序無關；三個都不同取中間",()=>{
   assert.deepEqual(BASICS,["fire","water","earth","wind"]);assert.equal(BASE_PRICE,10);assert.equal(ELEMENTS.length,6);
   assert.equal(craftResult(["fire","fire","fire"]),"fire");                      // 三個一樣 → 自己
@@ -67,11 +67,26 @@ test("三物合成：配方規則（雷＞蒸氣＞多數決）；順序無關�
   let n=0;for(const a of ELEMENTS)for(const b of ELEMENTS)for(const c of ELEMENTS)if(ELEMENTS.indexOf(a)<=ELEMENTS.indexOf(b)&&ELEMENTS.indexOf(b)<=ELEMENTS.indexOf(c)){n++;assert.ok(ELEMENTS.includes(craftResult([a,b,c])));}
   assert.equal(n,56);
 });
-test("投入元素：基礎元素一半、蒸氣與雷滿額；有上限",()=>{
-  assert.deepEqual(INJECT_POWER,{fire:.5,water:.5,earth:.5,wind:.5,steam:1,thunder:1});
-  assert.ok(Math.abs(injectNudge(0,"fire")-IM*.5)<1e-12);assert.ok(Math.abs(injectNudge(0,"steam")-IM)<1e-12);
-  assert.equal(injectNudge(BC,"steam"),BC);assert.equal(injectNudge(0,"nope"),0);
+test("投入物品：相關度換算成機率提升，乘上品階力道；有上限",()=>{
+  assert.deepEqual(LV_POWER,[.5,1,1.25,1.5]);assert.equal(MAX_LV,3);
+  assert.ok(Math.abs(injectNudge(0,100,0)-IM*.5)<1e-12);assert.ok(Math.abs(injectNudge(0,100,1)-IM)<1e-12);assert.ok(Math.abs(injectNudge(0,100,3)-IM*1.5)<1e-12);
+  assert.equal(injectNudge(0,70,2),0);                                         // 剛好等於門檻 → 沒影響
+  assert.ok(Math.abs(injectNudge(0,0,1)+IM)<1e-12);                            // 完全無關 → 壓低滿額
+  assert.equal(injectNudge(BC,100,3),BC);assert.equal(injectNudge(-BC,0,3),-BC);
+  assert.ok(Math.abs(injectNudge(0,80,1,60)-IM*(20/40))<1e-12);               // 門檻可調
 });
+test("相關度分級：分數被壓進該級的範圍",()=>{
+  assert.deepEqual(REL_RANGE,{direct:[85,100],strong:[65,84],weak:[20,45],none:[0,15]});
+  assert.equal(relScore("direct",50),85);assert.equal(relScore("direct",999),100);assert.equal(relScore("strong",90),84);assert.equal(relScore("weak",0),20);assert.equal(relScore("none",80),15);assert.equal(relScore("none","abc"),0);
+  assert.throws(()=>relScore("great",50),/invalid/);
+});
+test("背包格式：舊格式自動轉換；名稱驗證與正規化；配方鍵與順序無關",()=>{
+  assert.deepEqual(normInv({fire:2,steam:1,gold:3,water:0}),{火:{n:2,e:"🔥",lv:0},蒸氣:{n:1,e:"♨️",lv:1}});
+  assert.deepEqual(normInv({火:{n:1,e:"🔥",el:"fire"},雷:{n:2,e:"⚡",el:"thunder"},溫泉:{n:1,e:"♨️",lv:2},壞的:{n:0,e:"x",lv:1}}),{火:{n:1,e:"🔥",lv:0},雷:{n:2,e:"⚡",lv:1},溫泉:{n:1,e:"♨️",lv:2}});
+  assert.equal(validName("溫泉"),true);for(const bad of ["","a+b","a/b","超過十個字的物品名稱太長了"," 溫泉","溫  泉","溫泉\n"])assert.equal(validName(bad),false,bad);
+  assert.equal(normName("  溫　泉  "),"溫 泉");assert.equal(itemKey(["火","水","火"]),itemKey(["水","火","火"]));
+});
+
 import {owed,borrow,repay,overAt,mobDue,MOB_LIMIT,RATE} from "../src/logic.js";
 test("銀行：5%/24 小時複利、無借款上限、部分/全額還款",()=>{
   const t0=1e13;

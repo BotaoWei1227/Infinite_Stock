@@ -40,14 +40,16 @@ export function trade(d,id,price,dir,shares=1){
 }
 // ---- 練金合成：元素＝股票。火／水／土／風是基礎元素（可用現金買），蒸氣／雷只能合成出來。
 // 三物合成：拿三個元素，依下面的規則煉成一個元素。投入元素到「同名股票」會提高它的上漲機率（基礎元素 ×0.5、蒸氣／雷 ×1，滿額 5 個百分點）
-export const ELEMENTS=["fire","water","earth","wind","steam","thunder"],BASICS=["fire","water","earth","wind"];
+import {ELEMENTS,BASICS,TIER,BASE_ITEMS,MAX_LV,LV_POWER,normName,validName,itemKey,normInv,MAX_NAME} from "../../public/items.js";
+export {ELEMENTS,BASICS,TIER,BASE_ITEMS,MAX_LV,LV_POWER,normName,validName,itemKey,normInv,MAX_NAME};
 export const BASE_PRICE=10;                       // 一個基礎元素的價格
-export const INJECT_POWER={fire:.5,water:.5,earth:.5,wind:.5,steam:1,thunder:1};
-export const injectNudge=(bias,id)=>clamp((bias||0)+(INJECT_POWER[id]||0)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
+// 投入物品：先由 AI 判斷「物品與這檔股票的相關度」(0–100)，再由 nudge 換算成機率提升（高於門檻越多漲越多；沒高過則反而壓低），最後乘上物品品階的力道
+export const REL_RANGE={direct:[85,100],strong:[65,84],weak:[20,45],none:[0,15]};   // AI 先選分級，伺服器把分數壓進該級範圍（模型偏寬鬆時也不會給高分）
+export const relScore=(rel,score)=>{const r=REL_RANGE[rel];if(!r)throw new Error("invalid relevance");return Math.max(r[0],Math.min(r[1],Math.round(Number(score)||r[0])));};
+export const injectNudge=(bias,score,lv,threshold=SIM_THRESHOLD)=>clamp((bias||0)+(nudge(0,score,threshold))*(LV_POWER[lv]??LV_POWER[0]),-BIAS_CAP,BIAS_CAP);
 export const recipeKey=items=>[...items].sort((a,b)=>ELEMENTS.indexOf(a)-ELEMENTS.indexOf(b)).join("+");
 // 規則（依序）：①有風又有蒸氣 → 雷；②火、水、風三種都有 → 雷；③有火又有水 → 蒸氣；④否則取出現最多的元素（三個都不同時取中間的那一個）
 // 位階：基礎元素 0，蒸氣與雷 1。合成不會降級：三個元素裡只要有蒸氣或雷，結果至少也是蒸氣或雷。
-export const TIER={fire:0,water:0,earth:0,wind:0,steam:1,thunder:1};
 export const noDowngrade=(items,result)=>{
   const top=Math.max(...items.map(x=>TIER[x]||0));
   if((TIER[result]||0)>=top)return result;

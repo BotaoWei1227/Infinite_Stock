@@ -2,6 +2,7 @@ import {CFG} from "./config.js";
 import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
 import {getAuth,onAuthStateChanged,GoogleAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {createMono} from "./mono.js";
+import {normInv,BASE_ITEMS} from "./items.js";
 import {getFirestore,collection,doc,onSnapshot,query,orderBy,limit} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const $=id=>document.getElementById(id),S=sessionStorage;
@@ -49,11 +50,17 @@ function bailBlock(hidden=false){
 // 元素（＝股票）：名稱與圖示優先用行情資料，沒載入時用備用表
 const ELEM_FALLBACK={fire:["火","🔥"],water:["水","💧"],earth:["土","🪨"],wind:["風","🌪️"],steam:["蒸氣","♨️"],thunder:["雷","⚡"]},ELEM_IDS=Object.keys(ELEM_FALLBACK),BASIC_IDS=["fire","water","earth","wind"],BASE_PRICE=10;
 const elemName=id=>stocks[id]?.name||ELEM_FALLBACK[id]?.[0]||id,elemIcon=id=>stocks[id]?.emoji||ELEM_FALLBACK[id]?.[1]||"❔";
-const invCount=id=>Math.max(0,Number(me.inv?.[id]||0));
+// 背包：{物品名稱:{n,e,lv}}（舊格式會自動轉換）。排序：品階高的在前，再依名稱
+const REL={direct:"直接相關",strong:"高度相關",weak:"勉強相關",none:"無關"},stars=lv=>lv>0?" "+"★".repeat(lv):"";
+const bagOf=()=>normInv(me.inv),bagList=()=>Object.entries(bagOf()).sort((a,b)=>b[1].lv-a[1].lv||a[0].localeCompare(b[0],"zh-Hant")),pickItem={};
 async function inject(id){
-  if(!isDev&&invCount(id)<1)return say(`你沒有「${elemName(id)}」元素：到「練金工坊」買基礎元素或三物合成`);
-  const r=await act("inject",{stockId:id});
-  if(r)say(`已投入「${elemName(id)}」元素，提高${elemName(id)}的上漲機率（${r.tier==="crafted"?"高階元素，效果滿額":"基礎元素，效果一半"}）${r.up!=null?`（現在 ${r.up}%・僅開發者可見）`:""}`);
+  const mine=bagList();let name=mine.some(([n])=>n===pickItem[id])?pickItem[id]:mine[0]?.[0];
+  if(!name){
+    if(!isDev)return say("背包是空的：到「練金工坊」買基礎元素或三物合成，再回來投入");
+    name=(prompt("開發者：輸入要投入的物品名稱（免材料）",elemName(id))||"").trim();if(!name)return;
+  }
+  const r=await act("inject",{stockId:id,item:name});
+  if(r)say(`「${name}」和${elemName(id)}${REL[r.rel]||""}，${r.pass?"提高":"降低"}了${elemName(id)}的上漲機率${r.up!=null?`（現在 ${r.up}%・僅開發者可見）`:""}`);
 }
 const trade=async(id,dir)=>{const shares=tradeShares,r=await act("trade",{stockId:id,dir,shares});if(r){me={...me,cash:r.cash,hold:r.hold};say(`已${dir>0?"買入":"賣出"} ${shares} 股${stocks[id]?.name||""}`);render();}};
 // 上漲機率只有開發者看得到：資料放在伺服器的私密文件，開發者才能用 /odds 取得（一般玩家的瀏覽器裡根本沒有這些資料）
@@ -132,13 +139,13 @@ function renderStrip(){
 }
 let craftSig="";
 function renderCraft(){
-  const sig=JSON.stringify([isDev,me.inv||{},Object.keys(stocks).length,busy]);
+  const sig=JSON.stringify([isDev,bagOf(),Object.keys(stocks).length,busy]);
   if(sig===craftSig)return;craftSig=sig;
   const w=$("craft");w.replaceChildren(winBar("📦 BACKPACK.EXE",[el("span",{class:"wb dec","aria-hidden":"true",text:"_"}),el("span",{class:"wb dec","aria-hidden":"true",text:"×"})]));
-  const b=el("div",{class:"body"}),have=ELEM_IDS.filter(id=>invCount(id)>0);
-  b.append(have.length?el("div",{class:"chips"},...have.map(id=>el("span",{class:"echip",text:`${elemIcon(id)} ${elemName(id)} ×${invCount(id)}`}))):el("p",{class:"mu",text:user?"背包是空的。到練金工坊買基礎元素（火、水、土、風）或三物合成蒸氣、雷。":"登入後就能買元素、合成，再投入同名股票。"}));
+  const b=el("div",{class:"body"}),have=bagList();
+  b.append(have.length?el("div",{class:"chips"},...have.map(([n,x])=>el("span",{class:"echip",text:`${x.e} ${n}${stars(x.lv)} ×${x.n}`}))):el("p",{class:"mu",text:user?"背包是空的。到練金工坊買基礎元素（火、水、土、風），或把物品三物合成出新東西。":"登入後就能買元素、合成，再投入歸屬的股票。"}));
   if(isDev)b.append(el("p",{class:"mu",text:"🛠 開發者：投入元素不需要材料。"}));
-  b.append(el("div",{class:"row"},el("button",{class:"px-btn pri",type:"button",text:"⚗ 前往練金工坊",onclick:()=>setView("work")}),el("span",{class:"mu",text:"元素合成好後，到想影響的股票視窗按「投入元素」。"})));
+  b.append(el("div",{class:"row"},el("button",{class:"px-btn pri",type:"button",text:"⚗ 前往練金工坊",onclick:()=>setView("work")}),el("span",{class:"mu",text:"到想影響的股票視窗選一個物品投入，AI 會判斷它和那檔股票有多相關。"})));
   w.append(b);
 }
 function renderMarket(){
@@ -166,11 +173,17 @@ function renderMarket(){
       el("div",{class:"hd"},el("span",{class:"nm",text:s.name}),el("span",{class:"px big",text:fmt(s.price)}),el("span",{class:"chg "+(ch>=0?"up":"dn"),text:chTxt})),
       chart(s),
       ...(isDev&&odds?[el("div",{class:"meter"},el("span",{class:"k",text:"上漲機率 🔒"}),el("div",{class:"gauge","aria-hidden":"true"},el("i",{class:"gi","data-id":id,style:`width:${upPct(id)}%`})),el("b",{class:"gp","data-id":id,text:upPct(id)+"%"}))]:[]),
-      el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}｜背包${isDev?"（開發者免材料）":" "+invCount(id)+" 個"}`}),
+      el("div",{class:"mu",text:`持有 ${n} 股${s.last?"｜上次投入："+s.last:""}｜背包${isDev?"（開發者免材料）":" "+bagList().reduce((a,[,x])=>a+x.n,0)+" 個"}`}),
       el("div",{class:"acts"},
         el("button",{class:"px-btn buy-btn",type:"button",disabled:busy,text:`買 ${tradeShares}`,onclick:()=>trade(id,1)}),
         el("button",{class:"px-btn sell-btn",type:"button",disabled:busy,text:`賣 ${tradeShares}`,onclick:()=>trade(id,-1)}),
-        el("button",{class:"px-btn pri",type:"button",disabled:busy||(!isDev&&invCount(id)<1),text:`投入${s.name}元素`,onclick:()=>inject(id)})));
+        ...(()=>{
+          const mine=bagList();
+          if(!mine.length)return [el("button",{class:"px-btn pri",type:"button",disabled:busy||!isDev,text:isDev?"投入物品（開發者免材料）":"背包是空的",onclick:()=>inject(id)})];
+          if(!mine.some(([n])=>n===pickItem[id]))pickItem[id]=mine[0][0];
+          const sel=el("select",{class:"px-sel","aria-label":`選擇要投入${s.name}的物品`,onchange:()=>{pickItem[id]=sel.value;}});
+          mine.forEach(([n,x])=>sel.append(new Option(`${x.e} ${n}${stars(x.lv)} ×${x.n}`,n)));sel.value=pickItem[id];
+          return [sel,el("button",{class:"px-btn pri",type:"button",disabled:busy,text:"投入",onclick:()=>inject(id)})];})()));
     w.append(b);mk.append(w);
   }
 }
@@ -363,46 +376,46 @@ function updateBank(){
   bk.times.textContent=me.bankrupt>0?`你被黑道找上過 ${me.bankrupt} 次。`:"";
   bk.bail.hidden=!(me.jailUntil>Date.now());bk.b1.disabled=bk.b2.disabled=bk.b3.disabled=busy;bk.b2.disabled=busy||o<.005;bk.b3.disabled=busy||o<.005;
 }
-// ---------- 練金工坊：買基礎元素、三物合成 ----------
+// ---------- 練金工坊：買基礎元素、三物合成（AI 自由聯想） ----------
 let slots=[null,null,null],buyQty=1,craftMsg=null;
 function renderWork(){
   const v=$("v-work");v.replaceChildren();
-  const used=id=>slots.filter(x=>x===id).length,left=id=>invCount(id)-used(id);
-  const chip=(id,onclick,extra="")=>el("button",{type:"button",class:"echip btn",disabled:busy||!onclick,"aria-label":`${elemName(id)}${extra}`,onclick,text:`${elemIcon(id)} ${elemName(id)}${extra}`});
+  const bag=bagOf(),used=n=>slots.filter(x=>x===n).length,left=n=>(bag[n]?.n||0)-used(n);
+  const chip=(n,onclick,extra="")=>el("button",{type:"button",class:"echip btn",disabled:busy||!onclick,"aria-label":`${n}${extra}`,onclick,text:`${bag[n]?.e||""} ${n}${stars(bag[n]?.lv)}${extra}`});
   // 1. 背包
-  const bag=el("section",{class:"win","aria-label":"背包"});bag.append(winBar("📦 BACKPACK.EXE"));
-  const have=ELEM_IDS.filter(id=>invCount(id)>0),bb=el("div",{class:"body"});
-  bb.append(el("p",{class:"mu",text:"點背包裡的元素，放進下面的合成格；每個元素只能用一次（合成或投入股票都會消耗）。"}));
-  bb.append(have.length?el("div",{class:"chips"},...have.map(id=>chip(id,left(id)>0?()=>{const i=slots.indexOf(null);if(i<0)return say("三個格子都放滿了，先拿掉一個或按「合成」");slots[i]=id;renderWork();}:null,` ×${left(id)}`))):el("p",{class:"mu",text:user?"背包是空的，先到下面的材料店買基礎元素。":"請先登入 Google 帳號。"}));
-  bag.append(bb);v.append(bag);
+  const bagWin=el("section",{class:"win","aria-label":"背包"});bagWin.append(winBar("📦 BACKPACK.EXE"));
+  const have=bagList().map(([n])=>n),bb=el("div",{class:"body"});
+  bb.append(el("p",{class:"mu",text:"點背包裡的物品，放進下面的合成格；每個物品只能用一次（合成或投入股票都會消耗）。物品可以投入任何一檔股票，品階（★）越高力道越大。"}));
+  bb.append(have.length?el("div",{class:"chips"},...have.map(n=>chip(n,left(n)>0?()=>{const i=slots.indexOf(null);if(i<0)return say("三個格子都放滿了，先拿掉一個或按「合成」");slots[i]=n;renderWork();}:null,` ×${left(n)}`))):el("p",{class:"mu",text:user?"背包是空的，先到下面的材料店買基礎元素。":"請先登入 Google 帳號。"}));
+  bagWin.append(bb);v.append(bagWin);
   // 2. 材料店
   const shop=el("section",{class:"win","aria-label":"材料店"});shop.append(winBar("🛒 SHOP.EXE"));
-  const qty=el("input",{class:"px-in qty-in",type:"number",inputmode:"numeric",min:"1",max:"100",step:"1",value:String(buyQty),"aria-label":"購買數量",oninput:e=>{const n=Math.floor(Number(e.target.value));if(n>=1&&n<=100){buyQty=n;shop.querySelectorAll(".buy-el").forEach(b=>b.dataset.n=String(n));shop.querySelector(".cost").textContent=`${n*BASE_PRICE} 元`;}}});
+  const qty=el("input",{class:"px-in qty-in",type:"number",inputmode:"numeric",min:"1",max:"100",step:"1",value:String(buyQty),"aria-label":"購買數量",oninput:e=>{const n=Math.floor(Number(e.target.value));if(n>=1&&n<=100){buyQty=n;shop.querySelector(".cost").textContent=`${n*BASE_PRICE} 元`;}}});
   shop.append(el("div",{class:"body"},el("p",{class:"mu",text:`基礎元素：火、水、土、風，一個 ${BASE_PRICE} 元。蒸氣與雷不能買，只能合成。`}),
     el("div",{class:"row mono-row"},el("label",{class:"lbl",text:"數量"}),qty,el("span",{class:"mu"},document.createTextNode("花費 "),el("b",{class:"cost",text:`${buyQty*BASE_PRICE} 元`}))),
-    el("div",{class:"chips"},...BASIC_IDS.map(id=>el("button",{type:"button",class:"px-btn buy-el",disabled:busy||!user,text:`買 ${elemIcon(id)} ${elemName(id)}`,onclick:async()=>{const n=buyQty,r=await act("craft",{action:"buy",element:id,qty:n});if(r)say(`買了 ${n} 個${elemName(id)}，花 ${r.cost} 元`);}})))));
+    el("div",{class:"chips"},...BASIC_IDS.map(id=>el("button",{type:"button",class:"px-btn buy-el",disabled:busy||!user,text:`買 ${BASE_ITEMS[id].e} ${BASE_ITEMS[id].name}`,onclick:async()=>{const n=buyQty,r=await act("craft",{action:"buy",element:id,qty:n});if(r)say(`買了 ${n} 個${BASE_ITEMS[id].name}，花 ${r.cost} 元`);}})))));
   v.append(shop);
   // 3. 三物合成
   const lab=el("section",{class:"win","aria-label":"三物合成"});lab.append(winBar("⚗ ALCHEMY.EXE"));
   const filled=slots.every(Boolean),lb=el("div",{class:"body"});
-  lb.append(el("p",{class:"mu",text:"放入 3 個元素，由 AI 煉金師判定會煉出哪一種元素（可能是蒸氣或雷）。同一個組合永遠得到一樣的結果。蒸氣與雷不會降級：只要放了它們，結果至少也是蒸氣或雷。發現的配方會記在配方簿裡。"}));
-  lb.append(el("div",{class:"slots"},...slots.map((id,i)=>el("button",{type:"button",class:"slot"+(id?" on":""),"aria-label":id?`第 ${i+1} 格：${elemName(id)}，點一下拿掉`:`第 ${i+1} 格：空的`,onclick:()=>{if(id){slots[i]=null;renderWork();}},text:id?`${elemIcon(id)}\n${elemName(id)}`:"＋"})),
-    el("span",{class:"arrow","aria-hidden":"true",text:"→"}),el("div",{class:"slot out","aria-live":"polite",text:craftMsg?`${elemIcon(craftMsg.result)}\n${elemName(craftMsg.result)}`:"？"})));
+  lb.append(el("p",{class:"mu",text:"放入 3 個物品，由 AI 煉金師憑聯想創造出一個新物品（可能是溫泉、彩虹、火山…什麼都有可能），新物品也能再拿來合成。同一個組合永遠得到一樣的結果，品階不會比材料低。"}));
+  lb.append(el("div",{class:"slots"},...slots.map((n,i)=>el("button",{type:"button",class:"slot"+(n?" on":""),"aria-label":n?`第 ${i+1} 格：${n}，點一下拿掉`:`第 ${i+1} 格：空的`,onclick:()=>{if(n){slots[i]=null;renderWork();}},text:n?`${bag[n]?.e||""}\n${n}`:"＋"})),
+    el("span",{class:"arrow","aria-hidden":"true",text:"→"}),el("div",{class:"slot out","aria-live":"polite",text:craftMsg?`${craftMsg.e}\n${craftMsg.name}${stars(craftMsg.lv)}`:"？"})));
   lb.append(el("div",{class:"row"},
-    el("button",{type:"button",class:"px-btn pri",disabled:busy||!filled||!user,text:"⚗ 合成",onclick:async()=>{const items=[...slots],r=await act("craft",{action:"craft",items});if(r){slots=[null,null,null];craftMsg={result:r.result,reason:r.reason||""};say(`合成成功：得到 1 個「${elemName(r.result)}」${r.isNew?"（新發現的配方！）":""}`);renderWork();}}}),
+    el("button",{type:"button",class:"px-btn pri",disabled:busy||!filled||!user,text:"⚗ 合成",onclick:async()=>{const items=[...slots],r=await act("craft",{action:"craft",items});if(r){slots=[null,null,null];craftMsg={...r.result,reason:r.reason||""};say(`合成成功：得到 1 個「${r.result.name}」${r.isNew?"（新發現的配方！）":""}`);renderWork();}}}),
     el("button",{type:"button",class:"px-btn",disabled:busy||slots.every(x=>!x),text:"清空",onclick:()=>{slots=[null,null,null];craftMsg=null;renderWork();}})));
   if(craftMsg?.reason)lb.append(el("p",{class:"sage",text:`🧙 煉金師：${craftMsg.reason}`}));
-  if(craftMsg)lb.append(el("p",{class:"mu",text:`上一次合成得到：${elemIcon(craftMsg.result)} ${elemName(craftMsg.result)}。到交易區的「${elemName(craftMsg.result)}」股票視窗按「投入${elemName(craftMsg.result)}元素」，就會提高它的上漲機率。`}));
+  if(craftMsg)lb.append(el("p",{class:"mu",text:`上一次合成得到：${craftMsg.e} ${craftMsg.name}${stars(craftMsg.lv)}。到交易區任一檔股票的視窗選它、按「投入」，AI 會判斷它和那檔股票有多相關：越相關漲機率越高，不相關反而會壓低。`}));
   lab.append(lb);v.append(lab);
   // 4. 配方簿
   const book=el("section",{class:"win","aria-label":"配方簿"});book.append(winBar("📖 RECIPES.EXE"));
-  const recs=Object.entries(me.recipes||{}).sort(),rb=el("div",{class:"body"});
-  rb.append(recs.length?el("ul",{class:"list"},...recs.map(([k,res])=>el("li",{},el("span",{text:k.split("+").map(id=>`${elemIcon(id)}${elemName(id)}`).join(" ＋ ")}),el("b",{text:`→ ${elemIcon(res)} ${elemName(res)}`})))):el("p",{class:"mu",text:"還沒有發現任何配方。"}));
-  rb.append(el("p",{class:"mu",text:`投入股票的效果：基礎元素（火水土風）是蒸氣與雷的一半；蒸氣與雷滿額。每次投入都有幾秒冷卻，總偏移有上限，而且會慢慢消退。`}));
+  const recs=Object.entries(me.recipes||{}).filter(([,r])=>r&&typeof r==="object").sort(),rb=el("div",{class:"body"});
+  rb.append(recs.length?el("ul",{class:"list"},...recs.map(([k,r])=>el("li",{},el("span",{text:k.split("+").map((n,i)=>`${r.i?.[i]||""}${n}`).join(" ＋ ")}),el("b",{text:`→ ${r.e||""} ${r.n}${stars(r.lv)}`})))):el("p",{class:"mu",text:"還沒有發現任何配方。"}));
+  rb.append(el("p",{class:"mu",text:`投入股票的效果：看物品和股票的相關度（AI 判定），再乘上品階的力道（品階 0 是一半，1 是滿額）。每次投入都有幾秒冷卻，總偏移有上限，而且會慢慢消退。`}));
   book.append(rb);v.append(book);
 }
 // ---------- 設定（介面大小） ----------
-const RULE_TEXT="股價會自己隨機漲跌。到「練金工坊」買基礎元素（火、水、土、風，各 10 元），或把三個元素合成（蒸氣、雷只能合成），再回到這裡把元素投入同名股票：會提高它的上漲機率（基礎元素一半、蒸氣與雷滿額），效果會慢慢消退，每個元素只能用一次。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力：影響大小看你買賣的股數占全服持股的比例，賣掉大部分持股會重創，買賣 1 股幾乎沒有影響。";
+const RULE_TEXT="股價會自己隨機漲跌。到「練金工坊」買基礎元素（火、水、土、風，各 10 元），再把三個物品合成：AI 煉金師會憑聯想創造出新物品（溫泉、彩虹、火山…）。回到這裡選一個物品投入任何一檔股票：AI 會判斷它和這檔股票有多相關，越相關上漲機率提高越多，不相關反而會壓低；品階越高力道越大，效果會慢慢消退，每個物品只能用一次。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力：影響大小看你買賣的股數占全服持股的比例，賣掉大部分持股會重創，買賣 1 股幾乎沒有影響。";
 const SCALES={s:["小",.9],m:["中",1],l:["大",1.2]};
 let scaleKey="m";
 try{const k=localStorage.getItem("ui");if(SCALES[k])scaleKey=k;}catch{}
@@ -444,7 +457,7 @@ function setView(v){
 function render(){
   renderTicker();
   const rule=document.querySelector(".rule");if(rule)rule.textContent=RULE_TEXT;
-  if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：投入元素不需要材料":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"先到「練金工坊」準備元素，再到想影響的股票視窗按「投入元素」":"";
+  if(hinting)$("msg").textContent=!user?"請先登入 Google 帳號，就能買賣股票與使用銀行":isDev&&view==="trade"?"開發者模式：投入元素不需要材料":view==="bank"?"借來的錢可以拿去買股票，但利息一直在滾，記得還款":view==="trade"?"先到「練金工坊」做出物品，再到想影響的股票視窗選物品按「投入」":"";
   if(me.jailUntil>Date.now())$("msg").textContent="你目前正在服刑，剩餘 "+prisonLeft(me.jailUntil)+"；服刑期間不能進行遊戲操作，但可以到銀行借貸保釋。";
   renderStrip();
   if(view==="trade"){
@@ -525,7 +538,7 @@ function renderFeed(rows){
   rows.forEach(x=>{const t=x.at?.toDate?.();const hm=t?t.toLocaleTimeString("zh-TW",{hour:"2-digit",minute:"2-digit",hour12:false}):"";
     if(x.mob){f.append(el("div",{class:"mob"},document.createTextNode(`☠ ${x.who} 欠款 ${fmt(x.owed)} 拖過一天，被黑道抓走關押一天，資產重製`)));return;}
     if(x.robbery){f.append(el("div",{class:x.caught?"dn":"up"},el("span",{class:"tm",text:hm}),document.createTextNode(`🕶 ${x.who} ${x.caught?"在黑市行動中被捕並關押一天":"完成了一次黑市行動"}`)));return;}
-    if(x.element){f.append(el("div",{class:"up"},el("span",{class:"tm",text:hm}),document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」元素投入 ${x.stock}（${x.tier==="crafted"?"高階，滿額":"基礎，一半"}）`)));return;}
+    if(x.element){f.append(el("div",{class:"up"},el("span",{class:"tm",text:hm}),document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：${REL[x.rel]||""}${x.pass?" ✓":" ✗"}`)));return;}
     f.append(el("div",{class:(x.pass!=null?x.pass:x.pct!=null?x.pct>0:x.score>=50)?"up":"dn"},el("span",{class:"tm",text:hm}),
       document.createTextNode(`${x.who}${x.dev?" 🛠":""} 將「${x.item}」投入 ${x.stock}：相似度 ${x.score}${x.pass!=null?(x.pass?" ✓":" ✗"):""}${x.pct!=null?"，"+(x.pct>0?"+":"")+x.pct+"%":""}`)));});
 }

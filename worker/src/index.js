@@ -1,14 +1,15 @@
 import {route,tick,generateAutoNews,publishScheduledNews} from "./app.js";
 import {makeDb} from "./firestore.js";
 import {verifyFirebaseToken} from "./auth.js";
-import {autoNews as generateNews,craftJudge} from "./ia.js";
+import {autoNews as generateNews,craftJudge,judgeRelevance} from "./ia.js";
 const API=new Set(["/inject","/trade","/bank","/news","/odds","/whoami","/ensure-market","/profile","/leaderboard","/blackmarket","/analyst","/admin-settings","/monopoly","/craft"]);
 const deps=env=>({
   db:makeDb(env),
   verify:r=>verifyFirebaseToken(r,env),
   now:()=>Date.now(),rand:Math.random,secureRand:()=>crypto.getRandomValues(new Uint32Array(1))[0]/4294967296,
   autoNews:env.GEMINI_API_KEY?(stocks,slot,date)=>generateNews(fetch,env.GEMINI_API_KEY,stocks,slot,date):null,
-  craftAI:env.GEMINI_API_KEY?items=>craftJudge(fetch,env.GEMINI_API_KEY,items):null,   // 沒設 Key 時退回 logic.js 的固定配方
+  craftAI:env.GEMINI_API_KEY?req=>craftJudge(fetch,env.GEMINI_API_KEY,req):null,
+  judgeAI:env.GEMINI_API_KEY?req=>judgeRelevance(fetch,env.GEMINI_API_KEY,req):null,   // 沒設 Key 時：物品名稱和股票名稱相同才算直接相關   // 沒設 Key 時退回 logic.js 的固定配方
   devEmails:(env.DEV_EMAILS||"").split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)   // 機密，不放在倉庫裡
 });
 export default {
