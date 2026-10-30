@@ -385,12 +385,13 @@ function renderWork(){
   // 3. 三物合成
   const lab=el("section",{class:"win","aria-label":"三物合成"});lab.append(winBar("⚗ ALCHEMY.EXE"));
   const filled=slots.every(Boolean),lb=el("div",{class:"body"});
-  lb.append(el("p",{class:"mu",text:"放入 3 個元素合成 1 個新元素，結果可能是蒸氣或雷。多試試看，發現的配方會記在配方簿裡。"}));
+  lb.append(el("p",{class:"mu",text:"放入 3 個元素，由 AI 煉金師判定會煉出哪一種元素（可能是蒸氣或雷）。同一個組合永遠得到一樣的結果，發現的配方會記在配方簿裡。"}));
   lb.append(el("div",{class:"slots"},...slots.map((id,i)=>el("button",{type:"button",class:"slot"+(id?" on":""),"aria-label":id?`第 ${i+1} 格：${elemName(id)}，點一下拿掉`:`第 ${i+1} 格：空的`,onclick:()=>{if(id){slots[i]=null;renderWork();}},text:id?`${elemIcon(id)}\n${elemName(id)}`:"＋"})),
     el("span",{class:"arrow","aria-hidden":"true",text:"→"}),el("div",{class:"slot out","aria-live":"polite",text:craftMsg?`${elemIcon(craftMsg.result)}\n${elemName(craftMsg.result)}`:"？"})));
   lb.append(el("div",{class:"row"},
-    el("button",{type:"button",class:"px-btn pri",disabled:busy||!filled||!user,text:"⚗ 合成",onclick:async()=>{const items=[...slots],r=await act("craft",{action:"craft",items});if(r){slots=[null,null,null];craftMsg={result:r.result};say(`合成成功：得到 1 個「${elemName(r.result)}」${r.isNew?"（新發現的配方！）":""}`);renderWork();}}}),
+    el("button",{type:"button",class:"px-btn pri",disabled:busy||!filled||!user,text:"⚗ 合成",onclick:async()=>{const items=[...slots],r=await act("craft",{action:"craft",items});if(r){slots=[null,null,null];craftMsg={result:r.result,reason:r.reason||""};say(`合成成功：得到 1 個「${elemName(r.result)}」${r.isNew?"（新發現的配方！）":""}`);renderWork();}}}),
     el("button",{type:"button",class:"px-btn",disabled:busy||slots.every(x=>!x),text:"清空",onclick:()=>{slots=[null,null,null];craftMsg=null;renderWork();}})));
+  if(craftMsg?.reason)lb.append(el("p",{class:"sage",text:`🧙 煉金師：${craftMsg.reason}`}));
   if(craftMsg)lb.append(el("p",{class:"mu",text:`上一次合成得到：${elemIcon(craftMsg.result)} ${elemName(craftMsg.result)}。到交易區的「${elemName(craftMsg.result)}」股票視窗按「投入${elemName(craftMsg.result)}元素」，就會提高它的上漲機率。`}));
   lab.append(lb);v.append(lab);
   // 4. 配方簿

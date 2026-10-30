@@ -639,3 +639,49 @@ test("練金工坊：完整流程 買材料 → 合成蒸氣 → 投入蒸氣（
   x.db.m.get("players/g1").data.jailUntil=x.t.v+H;
   assert.equal((await CR(x,{action:"buy",element:"fire",qty:1})).status,403);
 });
+
+// ================= 三物合成交給 AI 判定 =================
+import {craftJudge} from "../src/ia.js";
+const gem=o=>async()=>({ok:true,json:async()=>({candidates:[{content:{parts:[{text:typeof o==="string"?o:JSON.stringify(o)}]}}]})});
+test("craftJudge：回傳元素代號與解說；容忍 markdown 圍欄與大小寫；不是元素或格式錯誤會丟錯",async()=>{
+  const K="k".repeat(12);
+  assert.deepEqual(await craftJudge(gem({result:"steam",reason:"火與水相遇，化為白霧。"}),K,["fire","water","earth"]),{result:"steam",reason:"火與水相遇，化為白霧。"});
+  assert.equal((await craftJudge(gem("```json\n{\"result\":\" THUNDER \",\"reason\":\"x\"}\n```"),K,["wind","steam","earth"])).result,"thunder");
+  for(const bad of [{result:"gold",reason:"x"},{result:5},{},"不是 JSON"])await assert.rejects(craftJudge(gem(bad),K,["fire","fire","fire"]),/invalid/);
+  await assert.rejects(craftJudge(async()=>({ok:false,status:429}),K,["fire","fire","fire"]),/429/);
+  await assert.rejects(craftJudge(gem({}),"",["fire","fire","fire"]),/GEMINI_API_KEY/);
+  await assert.rejects(craftJudge(gem({}),K,["fire","fire","gold"]),/invalid items/);
+  let prompt="";await craftJudge(async(u,o)=>{prompt=JSON.parse(o.body).contents[0].parts[0].text;assert.equal("temperature" in (JSON.parse(o.body).generationConfig||{}),false);return gem({result:"fire",reason:"x"})();},K,["fire","fire","fire"]);
+  assert.match(prompt,/fire（火）、fire（火）、fire（火）/);
+});
+test("AI 合成：結果由 AI 決定（不一定等於固定配方）；同一組合只問一次、所有玩家得到一樣的結果；結果存在私密文件",async()=>{
+  let calls=[];
+  const x=mk({craftAI:async items=>{calls.push(items);return {result:"earth",reason:"大地吞下一切。"};}});     // 固定配方會是 steam，AI 說是 earth
+  await x.call("/ensure-market");seed(x.db,"g1",{cash:100,inv:{fire:2,water:1}});seed(x.db,"g2",{cash:100,inv:{fire:2,water:1}});
+  const r=await CR(x,{action:"craft",items:["water","fire","fire"]});
+  assert.equal(r.status,200);assert.equal(r.body.result,"earth");assert.equal(r.body.reason,"大地吞下一切。");assert.equal(r.body.byAI,true);
+  assert.deepEqual(calls,[["fire","fire","water"]]);                                                  // 以固定順序送給 AI
+  assert.deepEqual(x.db.m.get("secret/recipes").data.book["fire+fire+water"],{r:"earth",w:"大地吞下一切。"});
+  assert.deepEqual(P(x.db).inv,{earth:1});assert.equal(P(x.db).recipes["fire+fire+water"],"earth");
+  x.state.uid="g2";const r2=await CR(x,{action:"craft",items:["fire","water","fire"]});                 // 另一位玩家、不同順序、同一組合
+  assert.equal(r2.body.result,"earth");assert.equal(calls.length,1);                                   // 不再問 AI
+});
+test("AI 合成：AI 失敗 → 503，材料不扣、不留紀錄；AI 回傳壞資料也一樣；沒有設定 AI 時退回固定配方",async()=>{
+  let ok=false;
+  const x=mk({craftAI:async()=>{if(!ok)throw new Error("Gemini 429");return {result:"thunder",reason:"雷聲轟隆。"};}});
+  await x.call("/ensure-market");seed(x.db,"g1",{cash:100,inv:{fire:1,water:1,wind:1}});
+  const r=await CR(x,{action:"craft",items:["fire","water","wind"]});assert.equal(r.status,503);assert.match(r.body.error.message,/材料沒有扣/);
+  assert.deepEqual(P(x.db).inv,{fire:1,water:1,wind:1});assert.equal(x.db.m.has("secret/recipes"),false);assert.equal(P(x.db).recipes,undefined);
+  ok=true;const r2=await CR(x,{action:"craft",items:["fire","water","wind"]});assert.equal(r2.status,200);assert.equal(r2.body.result,"thunder");
+  const y=mk();await y.call("/ensure-market");seed(y.db,"g1",{cash:100,inv:{fire:1,water:1,wind:1}});                // 沒有 craftAI
+  const r3=await CR(y,{action:"craft",items:["fire","water","wind"]});assert.equal(r3.body.result,"thunder");assert.equal(r3.body.byAI,false);assert.equal(y.db.m.has("secret/recipes"),false);
+});
+test("AI 合成：已快取的結果直接使用（AI 之後即使不可用也能合成）；快取裡的壞資料會被忽略並重新判定",async()=>{
+  const x=mk({craftAI:async()=>{throw new Error("down");}});await x.call("/ensure-market");seed(x.db,"g1",{cash:100,inv:{fire:3}});
+  x.db.m.set("secret/recipes",{v:"r0",data:{book:{"fire+fire+fire":{r:"wind",w:"風從火焰間竄出。"}}}});
+  const r=await CR(x,{action:"craft",items:["fire","fire","fire"]});assert.equal(r.status,200);assert.equal(r.body.result,"wind");assert.equal(r.body.reason,"風從火焰間竄出。");
+  const y=mk({craftAI:async()=>({result:"fire",reason:"重新判定"})});await y.call("/ensure-market");seed(y.db,"g1",{cash:100,inv:{fire:3}});
+  y.db.m.set("secret/recipes",{v:"r0",data:{book:{"fire+fire+fire":{r:"gold",w:"壞資料"}}}});
+  assert.equal((await CR(y,{action:"craft",items:["fire","fire","fire"]})).body.result,"fire");
+  assert.equal(y.db.m.get("secret/recipes").data.book["fire+fire+fire"].r,"fire");
+});

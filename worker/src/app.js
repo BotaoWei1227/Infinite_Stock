@@ -245,7 +245,7 @@ async function inject(d,a,{stockId}={}){
   });
 }
 // 練金工坊：買基礎元素（buy）、三物合成（craft）。元素放在玩家文件的 inv，已發現的配方放在 recipes
-const MAX_BUY=100;
+const MAX_BUY=100,RECIPES="secret/recipes";   // RECIPES：AI 判定過的合成結果（私密，客戶端讀不到）
 async function craft(d,a,{action,element,qty,items}={}){
   if(!["buy","craft"].includes(action))throw bad("參數錯誤");
   const pid=`players/${a.uid}`;
@@ -259,14 +259,26 @@ async function craft(d,a,{action,element,qty,items}={}){
       await d.db.commit([{path:pid,data:{...base,cash,inv},pre:p?p.version:null}]);
       return {ok:true,cash,inv,cost};
     }
-    let result;try{result=L.craftResult(items);}catch(e){throw bad(e.message);}
+    let ruleResult;try{ruleResult=L.craftResult(items);}catch(e){throw bad(e.message);}   // 檢查三個都是元素；也是沒有 AI 時的固定配方
     const need={};for(const x of items)need[x]=(need[x]||0)+1;
     for(const [e,n] of Object.entries(need))if(Number(inv[e]||0)<n)throw new HttpError(409,"failed-precondition",`元素不夠：需要 ${n} 個「${e}」，你只有 ${Number(inv[e]||0)} 個`);
+    // 結果交給 AI 判定：同一個組合只問一次，結果記在私密文件 secret/recipes，之後所有玩家都得到一樣的結果
+    const key=L.recipeKey(items),extra=[];let result=ruleResult,reason="",byAI=false;
+    if(d.craftAI){
+      const cd=await d.db.get(RECIPES),hit=cd?.data.book?.[key];
+      if(hit&&L.ELEMENTS.includes(hit.r)){result=hit.r;reason=hit.w||"";byAI=true;}
+      else{
+        let v;try{v=await d.craftAI([...items].sort((a,b)=>L.ELEMENTS.indexOf(a)-L.ELEMENTS.indexOf(b)));}
+        catch(e){console.error("craft judge failed",e?.message);throw new HttpError(503,"unavailable","煉金師暫時沒辦法判定這個組合，材料沒有扣，請稍後再試");}
+        result=v.result;reason=v.reason||"";byAI=true;
+        extra.push({path:RECIPES,data:{book:{...(cd?.data.book||{}),[key]:{r:result,w:reason}}},pre:cd?cd.version:null});
+      }
+    }
     for(const [e,n] of Object.entries(need)){inv[e]=Number(inv[e])-n;if(inv[e]<=0)delete inv[e];}
     inv[result]=Number(inv[result]||0)+1;
-    const key=L.recipeKey(items),recipes={...(p?.data.recipes||{})},isNew=!Object.hasOwn(recipes,key);recipes[key]=result;
-    await d.db.commit([{path:pid,data:{...base,inv,recipes,crafts:Number(p?.data.crafts||0)+1},pre:p?p.version:null}]);
-    return {ok:true,result,recipe:key,isNew,inv,recipes};
+    const recipes={...(p?.data.recipes||{})},isNew=!Object.hasOwn(recipes,key);recipes[key]=result;
+    await d.db.commit([{path:pid,data:{...base,inv,recipes,crafts:Number(p?.data.crafts||0)+1},pre:p?p.version:null},...extra]);
+    return {ok:true,result,reason,byAI,recipe:key,isNew,inv,recipes};
   });
 }
 // 全服持股（各股票所有玩家持有股數的總和）記在私密文件的 float；第一次沒有紀錄時，掃描一次玩家資料建立

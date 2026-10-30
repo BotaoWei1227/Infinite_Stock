@@ -1,4 +1,4 @@
-// 伺服器端的 Gemini 呼叫（金鑰只存在 Cloudflare Secret GEMINI_API_KEY）。目前只用來自動撰寫財經新聞。
+// 伺服器端的 Gemini 呼叫（金鑰只存在 Cloudflare Secret GEMINI_API_KEY）：自動撰寫財經新聞、判定三物合成的結果。
 export const NEWS_MODEL="gemini-3.6-flash";   // 這個模型已停用 temperature 參數，請求中不要帶
 // 自動財經新聞：台北時間 10/14/18/22 點各一則，由 AI 依世界觀撰寫，並對 1～2 檔股票微調上漲基準機率（±1～±30 個百分點，依新聞嚴重程度）
 export const AUTO_NEWS_MAX=30;
@@ -22,4 +22,29 @@ export async function autoNews(fetchFn,key,stocks,slot,date){
     if(ids.has(id)&&Number.isFinite(n)&&n!==0&&Object.keys(effects).length<2)effects[id]=Math.max(-AUTO_NEWS_MAX,Math.min(AUTO_NEWS_MAX,n));
   }
   return {title,body,effects};
+}
+
+// 三物合成判定：AI 依煉金術的直覺，決定三個元素合成出六種元素中的哪一個。
+// 同一個組合只會問一次（伺服器把結果記在私密文件），之後所有玩家都得到同樣的結果。
+export const CRAFT_ELEMENTS={fire:"火",water:"水",earth:"土",wind:"風",steam:"蒸氣",thunder:"雷"};
+export async function craftJudge(fetchFn,key,items){
+  if(typeof key!=="string"||key.length<10)throw new Error("missing GEMINI_API_KEY");
+  if(!Array.isArray(items)||items.length!==3||items.some(x=>!CRAFT_ELEMENTS[x]))throw new Error("invalid items");
+  const list=Object.entries(CRAFT_ELEMENTS).map(([id,n])=>`${id}（${n}）`).join("、");
+  const prompt=`你是「練金世界」的資深煉金師。世界觀：煉金術世界剛連上現代科技，有了股票，股票的名稱就是六種元素：${list}。其中火、水、土、風是基礎元素，蒸氣與雷是進階元素。
+玩家把三個元素放進煉金爐合成，請你判定會煉出哪一種元素。結果必須是上面六種元素之一（用英文代號）。
+判定原則：
+1. 以煉金術與自然現象的直覺為準：例如火遇水會變成蒸氣；風、水、火交會（雷雨）或風推動蒸氣會產生雷；三個相同的元素只會煉出該元素；組成單純的組合通常得到基礎元素。
+2. 只有組合明顯符合時才給蒸氣或雷，不要因為想獎勵玩家就隨便給進階元素；也不要讓所有組合都得到同一種結果。
+3. 同樣的三個元素，不管放的順序，答案都一樣。
+這次的三個元素是：${items.map(x=>`${x}（${CRAFT_ELEMENTS[x]}）`).join("、")}。
+只回傳 JSON：{"result":"元素英文代號","reason":"用繁體中文寫一句 12～40 字的煉金師解說，說明為什麼會煉出這個元素，語氣帶點神祕感，不要提機率或數值"}`;
+  const r=await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/${NEWS_MODEL}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json"}})});
+  if(!r.ok)throw new Error(`Gemini ${r.status}`);
+  const j=await r.json(),raw=(j.candidates?.[0]?.content?.parts||[]).map(p=>p.text||"").join("");
+  let x;try{x=JSON.parse(raw.replace(/```json|```/g,"").trim());}catch{throw new Error("invalid craft response");}
+  const result=typeof x.result==="string"?x.result.trim().toLowerCase():"";
+  if(!CRAFT_ELEMENTS[result])throw new Error("invalid craft result");
+  const reason=typeof x.reason==="string"?x.reason.replace(/[\u0000-\u001f]/g," ").trim().slice(0,80):"";
+  return {result,reason};
 }
