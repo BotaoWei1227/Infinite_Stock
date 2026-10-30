@@ -266,7 +266,7 @@ async function craft(d,a,{action,element,qty,items}={}){
     const key=L.recipeKey(items),extra=[];let result=ruleResult,reason="",byAI=false;
     if(d.craftAI){
       const cd=await d.db.get(RECIPES),hit=cd?.data.book?.[key];
-      if(hit&&L.ELEMENTS.includes(hit.r)){result=hit.r;reason=hit.w||"";byAI=true;}
+      if(hit&&L.ELEMENTS.includes(hit.r)){result=L.noDowngrade(items,hit.r);reason=result===hit.r?(hit.w||""):"進階元素的力量沒有消退，依舊保持原本的位階。";byAI=true;}   // 舊快取若有降級的結果也會被擋下
       else{
         let v;try{v=await d.craftAI([...items].sort((a,b)=>L.ELEMENTS.indexOf(a)-L.ELEMENTS.indexOf(b)));}
         catch(e){console.error("craft judge failed",e?.message);throw new HttpError(503,"unavailable","煉金師暫時沒辦法判定這個組合，材料沒有扣，請稍後再試");}

@@ -176,3 +176,18 @@ test("財經新聞活動：期間內才有效；多個活動相加；走一步�
   let c=markClaim({},"x",5);assert.deepEqual(c,{x:5});
   for(let i=0;i<150;i++)c=markClaim(c,"e"+i,10+i);assert.equal(Object.keys(c).length,100);assert.ok("e149" in c&&!("x" in c));
 });
+import {TIER,noDowngrade} from "../src/logic.js";
+test("合成不降級：56 種組合沒有任何一個結果的位階低於材料中最高的位階",()=>{
+  let n=0,bumped=0;
+  for(const a of ELEMENTS)for(const b of ELEMENTS)for(const c of ELEMENTS){
+    if(!(ELEMENTS.indexOf(a)<=ELEMENTS.indexOf(b)&&ELEMENTS.indexOf(b)<=ELEMENTS.indexOf(c)))continue;n++;
+    const r=craftResult([a,b,c]);assert.ok(TIER[r]>=Math.max(TIER[a],TIER[b],TIER[c]),`${a}+${b}+${c}→${r}`);
+  }
+  assert.equal(n,56);
+  assert.equal(craftResult(["steam","earth","earth"]),"steam");        // 原本多數決會掉回土
+  assert.equal(craftResult(["thunder","fire","earth"]),"thunder");
+  assert.equal(craftResult(["thunder","steam","earth"]),"steam");        // 兩個進階元素：位階沒降，照原規則取中間的
+  assert.equal(craftResult(["fire","fire","earth"]),"fire");           // 全是基礎元素時照舊
+  assert.equal(noDowngrade(["steam","fire","fire"],"earth"),"steam");assert.equal(noDowngrade(["thunder","steam","fire"],"fire"),"thunder");
+  assert.equal(noDowngrade(["fire","fire","fire"],"steam"),"steam");   // 升級不受限
+});

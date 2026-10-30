@@ -685,3 +685,17 @@ test("AI 合成：已快取的結果直接使用（AI 之後即使不可用也�
   assert.equal((await CR(y,{action:"craft",items:["fire","fire","fire"]})).body.result,"fire");
   assert.equal(y.db.m.get("secret/recipes").data.book["fire+fire+fire"].r,"fire");
 });
+
+test("AI 合成不降級：AI 給了降級結果會再問一次；兩次都降級就由伺服器升回進階元素；舊快取的降級結果也會被擋",async()=>{
+  const K="k".repeat(12);let n=0;const prompts=[];
+  const seqFetch=(...res)=>async(u,o)=>{prompts.push(JSON.parse(o.body).contents[0].parts[0].text);return gem({result:res[Math.min(n++,res.length-1)],reason:"解說"})();};
+  assert.deepEqual(await craftJudge(seqFetch("earth","steam"),K,["steam","earth","earth"]),{result:"steam",reason:"解說"});   // 第一次降級、第二次修正
+  assert.equal(n,2);assert.match(prompts[0],/只要三個元素裡有蒸氣或雷/);assert.doesNotMatch(prompts[0],/這次一定要是蒸氣或雷/);assert.match(prompts[1],/這次一定要是蒸氣或雷/);
+  n=0;const r=await craftJudge(seqFetch("earth"),K,["thunder","fire","earth"]);                  // 兩次都降級 → 強制升回
+  assert.equal(r.result,"thunder");assert.equal(n,2);assert.match(r.reason,/位階/);
+  n=0;assert.equal((await craftJudge(seqFetch("fire"),K,["fire","water","earth"])).result,"fire");assert.equal(n,1);   // 全是基礎元素：不會多問
+  // 伺服器端：舊快取裡的降級結果
+  const x=mk({craftAI:async()=>{throw new Error("down");}});await x.call("/ensure-market");seed(x.db,"g1",{cash:100,inv:{steam:1,earth:2}});
+  x.db.m.set("secret/recipes",{v:"r0",data:{book:{"earth+earth+steam":{r:"earth",w:"舊資料"}}}});
+  const c=await CR(x,{action:"craft",items:["steam","earth","earth"]});assert.equal(c.body.result,"steam");assert.match(c.body.reason,/位階/);assert.deepEqual(P(x.db).inv,{steam:1});
+});

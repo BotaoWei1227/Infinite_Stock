@@ -385,7 +385,7 @@ function renderWork(){
   // 3. 三物合成
   const lab=el("section",{class:"win","aria-label":"三物合成"});lab.append(winBar("⚗ ALCHEMY.EXE"));
   const filled=slots.every(Boolean),lb=el("div",{class:"body"});
-  lb.append(el("p",{class:"mu",text:"放入 3 個元素，由 AI 煉金師判定會煉出哪一種元素（可能是蒸氣或雷）。同一個組合永遠得到一樣的結果，發現的配方會記在配方簿裡。"}));
+  lb.append(el("p",{class:"mu",text:"放入 3 個元素，由 AI 煉金師判定會煉出哪一種元素（可能是蒸氣或雷）。同一個組合永遠得到一樣的結果。蒸氣與雷不會降級：只要放了它們，結果至少也是蒸氣或雷。發現的配方會記在配方簿裡。"}));
   lb.append(el("div",{class:"slots"},...slots.map((id,i)=>el("button",{type:"button",class:"slot"+(id?" on":""),"aria-label":id?`第 ${i+1} 格：${elemName(id)}，點一下拿掉`:`第 ${i+1} 格：空的`,onclick:()=>{if(id){slots[i]=null;renderWork();}},text:id?`${elemIcon(id)}\n${elemName(id)}`:"＋"})),
     el("span",{class:"arrow","aria-hidden":"true",text:"→"}),el("div",{class:"slot out","aria-live":"polite",text:craftMsg?`${elemIcon(craftMsg.result)}\n${elemName(craftMsg.result)}`:"？"})));
   lb.append(el("div",{class:"row"},

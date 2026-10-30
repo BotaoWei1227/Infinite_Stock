@@ -1,3 +1,4 @@
+import {noDowngrade} from "./logic.js";
 // 伺服器端的 Gemini 呼叫（金鑰只存在 Cloudflare Secret GEMINI_API_KEY）：自動撰寫財經新聞、判定三物合成的結果。
 export const NEWS_MODEL="gemini-3.6-flash";   // 這個模型已停用 temperature 參數，請求中不要帶
 // 自動財經新聞：台北時間 10/14/18/22 點各一則，由 AI 依世界觀撰寫，並對 1～2 檔股票微調上漲基準機率（±1～±30 個百分點，依新聞嚴重程度）
@@ -28,6 +29,13 @@ export async function autoNews(fetchFn,key,stocks,slot,date){
 // 同一個組合只會問一次（伺服器把結果記在私密文件），之後所有玩家都得到同樣的結果。
 export const CRAFT_ELEMENTS={fire:"火",water:"水",earth:"土",wind:"風",steam:"蒸氣",thunder:"雷"};
 export async function craftJudge(fetchFn,key,items){
+  for(let attempt=0;;attempt++){
+    const v=await craftJudgeOnce(fetchFn,key,items,attempt>0);
+    if(noDowngrade(items,v.result)===v.result)return v;                  // 沒有降級 → 採用
+    if(attempt>=1)return {result:noDowngrade(items,v.result),reason:"進階元素的力量沒有消退，依舊保持原本的位階。"};   // 問了兩次還是降級 → 伺服器強制升回進階元素
+  }
+}
+async function craftJudgeOnce(fetchFn,key,items,strict){
   if(typeof key!=="string"||key.length<10)throw new Error("missing GEMINI_API_KEY");
   if(!Array.isArray(items)||items.length!==3||items.some(x=>!CRAFT_ELEMENTS[x]))throw new Error("invalid items");
   const list=Object.entries(CRAFT_ELEMENTS).map(([id,n])=>`${id}（${n}）`).join("、");
@@ -37,6 +45,7 @@ export async function craftJudge(fetchFn,key,items){
 1. 以煉金術與自然現象的直覺為準：例如火遇水會變成蒸氣；風、水、火交會（雷雨）或風推動蒸氣會產生雷；三個相同的元素只會煉出該元素；組成單純的組合通常得到基礎元素。
 2. 只有組合明顯符合時才給蒸氣或雷，不要因為想獎勵玩家就隨便給進階元素；也不要讓所有組合都得到同一種結果。
 3. 同樣的三個元素，不管放的順序，答案都一樣。
+4. 不要降級：蒸氣與雷是辛苦煉成的進階元素。只要三個元素裡有蒸氣或雷，結果就必須是蒸氣或雷，不可以退回火、水、土、風。${strict?"（你上一次給了降級的結果，這次一定要是蒸氣或雷。）":""}
 這次的三個元素是：${items.map(x=>`${x}（${CRAFT_ELEMENTS[x]}）`).join("、")}。
 只回傳 JSON：{"result":"元素英文代號","reason":"用繁體中文寫一句 12～40 字的煉金師解說，說明為什麼會煉出這個元素，語氣帶點神祕感，不要提機率或數值"}`;
   const r=await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/${NEWS_MODEL}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json"}})});

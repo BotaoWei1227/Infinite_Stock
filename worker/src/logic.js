@@ -46,7 +46,15 @@ export const INJECT_POWER={fire:.5,water:.5,earth:.5,wind:.5,steam:1,thunder:1};
 export const injectNudge=(bias,id)=>clamp((bias||0)+(INJECT_POWER[id]||0)*INJECT_MAX,-BIAS_CAP,BIAS_CAP);
 export const recipeKey=items=>[...items].sort((a,b)=>ELEMENTS.indexOf(a)-ELEMENTS.indexOf(b)).join("+");
 // 規則（依序）：①有風又有蒸氣 → 雷；②火、水、風三種都有 → 雷；③有火又有水 → 蒸氣；④否則取出現最多的元素（三個都不同時取中間的那一個）
-export function craftResult(items){
+// 位階：基礎元素 0，蒸氣與雷 1。合成不會降級：三個元素裡只要有蒸氣或雷，結果至少也是蒸氣或雷。
+export const TIER={fire:0,water:0,earth:0,wind:0,steam:1,thunder:1};
+export const noDowngrade=(items,result)=>{
+  const top=Math.max(...items.map(x=>TIER[x]||0));
+  if((TIER[result]||0)>=top)return result;
+  return items.includes("thunder")?"thunder":"steam";
+};
+export const craftResult=items=>noDowngrade(items,baseResult(items));
+function baseResult(items){
   if(!Array.isArray(items)||items.length!==3||items.some(x=>!ELEMENTS.includes(x)))throw new Error("三物合成需要選 3 個元素");
   const has=e=>items.includes(e),sorted=[...items].sort((a,b)=>ELEMENTS.indexOf(a)-ELEMENTS.indexOf(b));
   if(has("wind")&&has("steam"))return "thunder";
