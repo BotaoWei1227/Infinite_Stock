@@ -268,7 +268,7 @@ async function inject(d,a,{stockId,item,geminiKey}={}){
       {path:pid,data:{...(p?{}:{cash:START,hold:{}}),name:p?.data.name||a.name||"玩家",lastInjectAt:now,...(dev?{}:{inv})},pre:p?p.version:null},
       {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:label,element:true,rel,pass,...(dev?{dev:true}:{})},ts:["at"],pre:null},...extra]);
     // 機率只有開發者看得到：一般玩家的回應只有相關程度，不含機率與分數
-    return {ok:true,price:s.price,rel,pass,lv,left:dev?0:Number(inv[name]?.n||0),...(dev?{up,score}:{})};
+    return {ok:true,price:s.price,rel,pass,lv,left:dev?0:Number(inv[name]?.n||0),...(dev?{up,score}:{inv})};
   });
 }
 // 練金工坊：買基礎元素（buy）、三物合成（craft）。背包 inv：{物品名稱:{n,e,lv}}；已發現的配方放在 recipes
@@ -324,6 +324,7 @@ async function craft(d,a,{action,element,qty,items,url,geminiKey}={}){
         const reg=await d.db.get(REGISTRY),regDefs={...(reg?.data.defs||{})},recent=[...(reg?.data.recent||[])];
         let v;try{v=await d.craftAI({items:[...defs].sort((x,y)=>x.name<y.name?-1:1),avoid:[...recent]},uk);}
         catch(e){console.error("craft judge failed",e?.message);throw aiError(e,uk,"煉金師暫時沒辦法判定這個組合，材料沒有扣，請稍後再試");}
+        if(!v||!L.validName(v.name)||typeof v.e!=="string"||!v.e||!Number.isInteger(v.lv)){console.error("craft judge returned bad data");throw new HttpError(503,"unavailable","煉金師暫時沒辦法判定這個組合，材料沒有扣，請稍後再試");}   // 伺服器自己也檢查一次 AI 的輸出
         let {name,e,lv}=v;reason=v.reason||"";
         const baseId=BASE_BY_NAME[name],known=regDefs[name];
         if(baseId){e=L.BASE_ITEMS[baseId].e;lv=L.BASE_ITEMS[baseId].lv;}                // 基礎名稱固定圖示與品階

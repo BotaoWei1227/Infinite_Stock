@@ -11,7 +11,7 @@ export const MAX_NAME=10;
 // 名稱正規化：NFKC、去頭尾空白、連續空白合成一個
 export const normName=s=>String(s??"").normalize("NFKC").replace(/\s+/g," ").trim();
 // 名稱是否可用：1～10 個字、不含 + / 與控制字元（+ 用來串配方鍵）
-export const validName=s=>{const n=normName(s),len=[...n].length;return n===s&&len>=1&&len<=MAX_NAME&&!/[+\/\u0000-\u001f\u007f]/.test(n);};
+export const validName=s=>{const n=normName(s),len=[...n].length;return n===s&&len>=1&&len<=MAX_NAME&&!/[+\/\u0000-\u001f\u007f]/.test(n)&&!/^__.*__$/.test(n);};   // __x__ 是 Firestore 保留的欄位名
 // 配方鍵：三個物品名稱依字碼排序後用 + 串起來（與放入順序無關）
 export const itemKey=names=>[...names].sort().join("+");
 // 舊版背包：{fire:2}（元素代號 → 數量）或 {火:{n,e,el}}；轉成 {火:{n:2,e:"🔥",lv:0}}

@@ -832,3 +832,16 @@ test("綁定自己的 Gemini Key：不限制格式（短的、含各種符號、
   }
   assert.equal(seen.length,5);assert.equal(seen[1],"short");assert.equal(seen[3].length,512);
 });
+
+// ================= 動作回應要帶最新資料（讓畫面立刻更新） =================
+test("動作回應帶最新背包：買、合成、領取、投入都回傳 inv；保留的欄位名稱（__x__）不能當物品名稱",async()=>{
+  const x=mk({fetchShare:async()=>GOOD,craftAI:async()=>({name:"__保留__",e:"✨",lv:0,reason:"x"})});x.t.v=Date.UTC(2026,9,30,12,0);
+  await x.call("/ensure-market");seed(x.db,"g1",{cash:100});x.state.noSeed=true;
+  const b=await CR(x,{action:"buy",element:"fire",qty:2});assert.deepEqual(b.body.inv,{火:{n:2,e:"🔥",lv:0}});assert.equal(b.body.cash,80);
+  const g=await CR(x,{action:"import",url:URL1});assert.deepEqual(g.body.inv.萌蟑螂,{n:1,e:"🪳",lv:1});assert.equal(g.body.inv.火.n,2);
+  const i=await x.call("/inject",{stockId:"fire",item:"萌蟑螂"});assert.deepEqual(i.body.inv,{火:{n:2,e:"🔥",lv:0}});                  // 投入後剩下的背包
+  assert.equal(L.validName("__x__"),false);assert.equal(L.validName("_a_"),true);
+  await CR(x,{action:"buy",element:"fire",qty:1});                                                                                   // 湊成 3 個火
+  const c=await CR(x,{action:"craft",items:["火","火","火"]});assert.equal(c.status,503);                                             // AI 給了保留名稱 → 視為壞資料，不扣材料
+  assert.equal(P(x.db).inv.火.n,3);
+});

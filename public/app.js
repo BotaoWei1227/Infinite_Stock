@@ -3,7 +3,7 @@ import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase
 import {getAuth,onAuthStateChanged,GoogleAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {createMono} from "./mono.js";
 import {normInv,BASE_ITEMS} from "./items.js";
-import {getFirestore,collection,doc,onSnapshot,query,orderBy,limit} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+import {getFirestore,initializeFirestore,getDoc,collection,doc,onSnapshot,query,orderBy,limit} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const $=id=>document.getElementById(id),S=sessionStorage;
 const fmt=n=>(Math.round(n*100)/100).toFixed(2);
@@ -40,13 +40,27 @@ const K=(()=>{
 const KEY_URL="https://aistudio.google.com/apikey";   // 官方申請 Key 的頁面
 const keyLink=text=>el("a",{class:"px-btn pri",href:KEY_URL,target:"_blank",rel:"noopener noreferrer",text,"aria-label":`${text}（會在新分頁開啟 Google AI Studio）`});
 const maskKey=k=>k?`${k.slice(0,4)}…${k.slice(-4)}`:"";
-async function act(name,data){
+// 動作做完後讓畫面立刻更新：①用伺服器回應裡的最新資料（現金、持股、背包、配方）直接更新；②稍後再向伺服器重抓一次玩家資料（以及大富翁棋盤）對帳，
+// 不必等 Firestore 即時連線（手機上常常延遲或斷線）。即時連線仍然照常運作。
+const ME_KEYS=["cash","hold","inv","recipes"];
+function applyResult(j){if(j&&typeof j==="object")for(const k of ME_KEYS)if(Object.hasOwn(j,k)&&j[k]!=null)me={...me,[k]:j[k]};}
+let recTimer=null;
+function reconcile(name){
+  clearTimeout(recTimer);
+  recTimer=setTimeout(async()=>{
+    if(!db||!user)return;
+    try{const s=await getDoc(doc(db,"players",user.uid));if(s.exists()){me={...s.data()};render();}}catch{}
+    if(name==="monopoly"&&view==="mono"){try{const s=await getDoc(doc(db,"monopoly","state"));mono.update(s.exists()?s.data():{});}catch{}}
+  },900);
+}
+async function act(name,data,onOk){
   if(busy)return null;if(!user){say("請先以 Google 帳號登入");return null;}
   busy=true;say("處理中…");render();
   try{
     const r=await fetch(CFG.api+"/"+name,{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:JSON.stringify((name==="craft"||name==="inject")&&K.get()?{...data,geminiKey:K.get()}:data)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(j.error?.message||("HTTP "+r.status));
+    applyResult(j);if(onOk)onOk(j);reconcile(name);
     return j;
   }
   catch(e){say(e.message);return null;}
@@ -405,7 +419,7 @@ function renderWork(){
   const gift=el("section",{class:"win","aria-label":"領取傳授連結"});gift.append(winBar("🎁 GIFT.EXE"));
   const link=el("input",{class:"px-in link-in",type:"url",inputmode:"url",autocomplete:"off",placeholder:SHARE_PREFIX+"XXXXXXXX","aria-label":"《無限煉製》傳授連結",value:shareText,oninput:e=>{shareText=e.target.value;ok.disabled=busy||!user||!SHARE_OK.test(shareText.trim());hint.textContent=shareText&&!SHARE_OK.test(shareText.trim())?"連結格式不符，必須是 "+SHARE_PREFIX+"代碼":"";}});
   const hint=el("p",{class:"hot",role:"status",text:shareText&&!SHARE_OK.test(shareText.trim())?"連結格式不符，必須是 "+SHARE_PREFIX+"代碼":""});
-  const ok=el("button",{type:"button",class:"px-btn pri",disabled:busy||!user||!SHARE_OK.test(shareText.trim()),text:"🎁 領取造物",onclick:async()=>{const r=await act("craft",{action:"import",url:shareText.trim()});if(r){shareText="";say(`領到「${r.item.e} ${r.item.name}」（${r.sender} 傳授）`);renderWork();}}});
+  const ok=el("button",{type:"button",class:"px-btn pri",disabled:busy||!user||!SHARE_OK.test(shareText.trim()),text:"🎁 領取造物",onclick:async()=>{const r=await act("craft",{action:"import",url:shareText.trim()},()=>{shareText="";});if(r)say(`領到「${r.item.e} ${r.item.name}」（${r.sender} 傳授）`);}});
   gift.append(el("div",{class:"body"},el("p",{class:"mu",text:"在《無限煉製》把造物「傳授」給別人會產生連結，貼在這裡就能把那個造物領進背包（名稱和圖示照原本的）。每個連結每人只能領一次，連結過期就不能領；每天最多領 20 個。"}),link,hint,el("div",{class:"row"},ok)));
   v.append(gift);
   // 2. 材料店
@@ -422,7 +436,7 @@ function renderWork(){
   lb.append(el("div",{class:"slots"},...slots.map((n,i)=>el("button",{type:"button",class:"slot"+(n?" on":""),"aria-label":n?`第 ${i+1} 格：${n}，點一下拿掉`:`第 ${i+1} 格：空的`,onclick:()=>{if(n){slots[i]=null;renderWork();}},text:n?`${bag[n]?.e||""}\n${n}`:"＋"})),
     el("span",{class:"arrow","aria-hidden":"true",text:"→"}),el("div",{class:"slot out","aria-live":"polite",text:craftMsg?`${craftMsg.e}\n${craftMsg.name}${stars(craftMsg.lv)}`:"？"})));
   lb.append(el("div",{class:"row"},
-    el("button",{type:"button",class:"px-btn pri",disabled:busy||!filled||!user,text:"⚗ 合成",onclick:async()=>{const items=[...slots],r=await act("craft",{action:"craft",items});if(r){slots=[null,null,null];craftMsg={...r.result,reason:r.reason||""};say(`合成成功：得到 1 個「${r.result.name}」${r.isNew?"（新發現的配方！）":""}`);renderWork();}}}),
+    el("button",{type:"button",class:"px-btn pri",disabled:busy||!filled||!user,text:"⚗ 合成",onclick:async()=>{const items=[...slots],r=await act("craft",{action:"craft",items},j=>{slots=[null,null,null];craftMsg={...j.result,reason:j.reason||""};});if(r)say(`合成成功：得到 1 個「${r.result.name}」${r.isNew?"（新發現的配方！）":""}`);}}),
     el("button",{type:"button",class:"px-btn",disabled:busy||slots.every(x=>!x),text:"清空",onclick:()=>{slots=[null,null,null];craftMsg=null;renderWork();}})));
   if(craftMsg?.reason)lb.append(el("p",{class:"sage",text:`🧙 煉金師：${craftMsg.reason}`}));
   if(craftMsg)lb.append(el("p",{class:"mu",text:`上一次合成得到：${craftMsg.e} ${craftMsg.name}${stars(craftMsg.lv)}。到交易區任一檔股票的視窗選它、按「投入」，AI 會判斷它和那檔股票有多相關：越相關漲機率越高，不相關反而會壓低。`}));
@@ -583,7 +597,9 @@ async function main(){
   applyScale();wireSettings();wireNav();marketOpenPrev=marketOpenClient();
   setView({"#mono":"mono","#news":"news","#rank":"rank","#black":"black","#analyst":"analyst","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
   if([CFG.firebase.apiKey,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase 與 Worker 網址");return;}
-  const app=initializeApp(CFG.firebase);db=getFirestore(app);if(view==="mono")monoSub(true);
+  const app=initializeApp(CFG.firebase);
+  // 手機網路常讓 Firestore 的即時連線卡住；自動偵測並改用長輪詢，更新才不會漏掉
+  try{db=initializeFirestore(app,{experimentalAutoDetectLongPolling:true});}catch{db=getFirestore(app);}if(view==="mono")monoSub(true);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
   onAuthStateChanged(auth,u=>{
     user=u;isDev=false;craftSig="";analystReport=null;analystStock="";offP&&offP();offP=null;

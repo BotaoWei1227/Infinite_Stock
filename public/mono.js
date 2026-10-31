@@ -100,13 +100,13 @@ export function createMono({host,el,fmt,say,act,getMe,getUser,isBusy}){
         :`過路費：持有 1～4 座煉爐 → ${RAIL_RENT.join(" / ")}`}));
       if(o)box.append(el("p",{class:"mu",text:`現在過路費：${rentOf(i,st.owners)} 元`}));
       const here=i===myPos(),busy=isBusy();
-      if(here&&!o)box.append(el("button",{type:"button",class:"px-btn pri",text:`買下（${t.price} 元）`,disabled:busy||me.cash<t.price,onclick:async()=>{const r=await act("monopoly",{action:"buy"});if(r)say(`買下了「${r.name}」`);}}));
+      if(here&&!o)box.append(el("button",{type:"button",class:"px-btn pri",text:`買下（${t.price} 元）`,disabled:busy||me.cash<t.price,onclick:async()=>{const r=await act("monopoly",{action:"buy"},j=>{st.owners={...st.owners,[j.bought]:{u:uid(),n:me.name||"我",lv:0}};});if(r)say(`買下了「${r.name}」`);}}));
       if(o&&uid()&&o.u===uid()){const mineL=offerList().find(x=>x.k==="sell"&&x.tile===i&&x.u===uid());
         box.append(el("button",{type:"button",class:"px-btn",text:mineL?`改價重掛（現 ${mineL.price}）`:"掛牌出售",disabled:busy,onclick:async()=>{const v=askPrice(`「${t.name}」要賣多少元？（等級 ${o.lv||0} 會一起轉讓）`,mineL?.price||t.price);if(v)trade({action:"list",tile:i,price:v},()=>`已掛牌「${t.name}」${v} 元`);}}));}
       if(o&&uid()&&o.u!==uid()){const sale=offerList().find(x=>x.k==="sell"&&x.tile===i);
         if(sale)box.append(el("button",{type:"button",class:"px-btn pri",text:`以 ${sale.price} 元買下`,disabled:busy||me.cash<sale.price,onclick:()=>{if(confirm(`以 ${sale.price} 元買下「${t.name}」？`))trade({action:"accept",offerId:sale.id},r=>`買下了「${r.name}」（${r.price} 元）`);}}));
         box.append(el("button",{type:"button",class:"px-btn",text:"出價購買",disabled:busy,onclick:async()=>{const v=askPrice(`向 ${o.n} 出價買「${t.name}」，出多少元？`,sale?.price||t.price);if(v)trade({action:"bid",tile:i,price:v},()=>`已向 ${o.n} 出價 ${v} 元，等他回應`);}}));}
-      if(o&&o.u===uid()&&t.type==="prop"&&(o.lv||0)<MAX_LV)box.append(el("button",{type:"button",class:"px-btn",text:`升級（${t.up} 元）`,disabled:busy||me.cash<t.up,onclick:async()=>{const r=await act("monopoly",{action:"upgrade",tile:i});if(r)say(`「${t.name}」升到 ${r.lv} 級`);}}));
+      if(o&&o.u===uid()&&t.type==="prop"&&(o.lv||0)<MAX_LV)box.append(el("button",{type:"button",class:"px-btn",text:`升級（${t.up} 元）`,disabled:busy||me.cash<t.up,onclick:async()=>{const r=await act("monopoly",{action:"upgrade",tile:i},j=>{st.owners={...st.owners,[i]:{...st.owners[i],lv:j.lv}};});if(r)say(`「${t.name}」升到 ${r.lv} 級`);}}));
     }
     else box.append(el("p",{class:"mu",text:{start:`經過或停在起點可領薪水`,jail:"探監：只是路過，沒有效果",park:"賢者之泉：休息一下，沒有效果",gojail:"押送入獄：移到探監格並罰款（不會被關 24 小時）",tax:"稅務所：繳稅",chance:"抽一張機會卡",fate:"抽一張命運卡"}[t.type]||""}));
     return box;
@@ -117,8 +117,8 @@ export function createMono({host,el,fmt,say,act,getMe,getUser,isBusy}){
     const p=myPos(),sel=selected??p;
     const bar=el("div",{class:"bar"},el("span",{class:"tt",text:"🎲 MONOPOLY.EXE"}));
     const rollBtn=el("button",{type:"button",class:"px-btn pri roll",disabled:!user||busy||jailed||(!free&&me.cash<ROLL_COST),text:free?`🎲 免費擲骰（剩 ${free} 次）`:`🎲 擲骰（${ROLL_COST} 元）`,onclick:async()=>{
-      const r=await act("monopoly",{action:"roll"});if(!r)return;
-      last=r;selected=null;render();say(`擲出 ${r.dice[0]}+${r.dice[1]}，來到「${BOARD[r.to].name}」`);focus(r.to);}});
+      const r=await act("monopoly",{action:"roll"},j=>{last=j;selected=null;st.pos={...st.pos,[uid()]:{...(st.pos[uid()]||{}),p:j.to,n:getUser()?.displayName||st.pos[uid()]?.n||"玩家"}};});if(!r)return;
+      render();say(`擲出 ${r.dice[0]}+${r.dice[1]}，來到「${BOARD[r.to].name}」`);focus(r.to);}});
     const res=last?el("div",{class:"mono-result"},el("b",{text:`🎲 ${last.dice[0]} + ${last.dice[1]} = ${last.dice[0]+last.dice[1]}`}),el("ul",{},...last.events.map(e=>el("li",{text:e})))):el("p",{class:"mu",text:user?"按下擲骰開始。你的棋子是棋盤上發亮的那一個。":"請先以 Google 帳號登入，就能加入大富翁。"});
     return [bar,el("div",{class:"body"},
       el("div",{class:"row mono-row"},rollBtn,el("span",{class:"mu",text:`現金 ${fmt(me.cash)}　位置：第 ${p} 格「${BOARD[p].name}」`}),el("button",{type:"button",class:"px-btn",text:"找到我",onclick:()=>focus(p)})),
