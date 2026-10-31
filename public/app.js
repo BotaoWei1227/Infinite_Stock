@@ -377,7 +377,8 @@ function updateBank(){
   bk.bail.hidden=!(me.jailUntil>Date.now());bk.b1.disabled=bk.b2.disabled=bk.b3.disabled=busy;bk.b2.disabled=busy||o<.005;bk.b3.disabled=busy||o<.005;
 }
 // ---------- 練金工坊：買基礎元素、三物合成（AI 自由聯想） ----------
-let slots=[null,null,null],buyQty=1,craftMsg=null;
+let slots=[null,null,null],buyQty=1,craftMsg=null,shareText="";
+const SHARE_PREFIX="https://pillars-of-creation.funtuan.work/s/",SHARE_OK=/^https:\/\/pillars-of-creation\.funtuan\.work\/s\/[A-Z0-9]{16,40}\/?(?:[?#].*)?$/;
 function renderWork(){
   const v=$("v-work");v.replaceChildren();
   const bag=bagOf(),used=n=>slots.filter(x=>x===n).length,left=n=>(bag[n]?.n||0)-used(n);
@@ -388,6 +389,13 @@ function renderWork(){
   bb.append(el("p",{class:"mu",text:"點背包裡的物品，放進下面的合成格；每個物品只能用一次（合成或投入股票都會消耗）。物品可以投入任何一檔股票，品階（★）越高力道越大。"}));
   bb.append(have.length?el("div",{class:"chips"},...have.map(n=>chip(n,left(n)>0?()=>{const i=slots.indexOf(null);if(i<0)return say("三個格子都放滿了，先拿掉一個或按「合成」");slots[i]=n;renderWork();}:null,` ×${left(n)}`))):el("p",{class:"mu",text:user?"背包是空的，先到下面的材料店買基礎元素。":"請先登入 Google 帳號。"}));
   bagWin.append(bb);v.append(bagWin);
+  // 1.5 領取《無限煉製》傳授連結：貼上網址，造物（名稱與圖示）會放進背包
+  const gift=el("section",{class:"win","aria-label":"領取傳授連結"});gift.append(winBar("🎁 GIFT.EXE"));
+  const link=el("input",{class:"px-in link-in",type:"url",inputmode:"url",autocomplete:"off",placeholder:SHARE_PREFIX+"XXXXXXXX","aria-label":"《無限煉製》傳授連結",value:shareText,oninput:e=>{shareText=e.target.value;ok.disabled=busy||!user||!SHARE_OK.test(shareText.trim());hint.textContent=shareText&&!SHARE_OK.test(shareText.trim())?"連結格式不符，必須是 "+SHARE_PREFIX+"代碼":"";}});
+  const hint=el("p",{class:"hot",role:"status",text:shareText&&!SHARE_OK.test(shareText.trim())?"連結格式不符，必須是 "+SHARE_PREFIX+"代碼":""});
+  const ok=el("button",{type:"button",class:"px-btn pri",disabled:busy||!user||!SHARE_OK.test(shareText.trim()),text:"🎁 領取造物",onclick:async()=>{const r=await act("craft",{action:"import",url:shareText.trim()});if(r){shareText="";say(`領到「${r.item.e} ${r.item.name}」（${r.sender} 傳授）`);renderWork();}}});
+  gift.append(el("div",{class:"body"},el("p",{class:"mu",text:"在《無限煉製》把造物「傳授」給別人會產生連結，貼在這裡就能把那個造物領進背包（名稱和圖示照原本的）。每個連結每人只能領一次，連結過期就不能領；每天最多領 20 個。"}),link,hint,el("div",{class:"row"},ok)));
+  v.append(gift);
   // 2. 材料店
   const shop=el("section",{class:"win","aria-label":"材料店"});shop.append(winBar("🛒 SHOP.EXE"));
   const qty=el("input",{class:"px-in qty-in",type:"number",inputmode:"numeric",min:"1",max:"100",step:"1",value:String(buyQty),"aria-label":"購買數量",oninput:e=>{const n=Math.floor(Number(e.target.value));if(n>=1&&n<=100){buyQty=n;shop.querySelector(".cost").textContent=`${n*BASE_PRICE} 元`;}}});

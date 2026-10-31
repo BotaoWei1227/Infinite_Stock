@@ -985,3 +985,4 @@ button.echip:disabled{opacity:.45;cursor:default;}
 .slot.out{border-style:solid;border-color:var(--amber);cursor:default;}
 .arrow{font-size:22px;color:var(--amber);}
 .sage{margin:6px 0;padding:6px 10px;border-left:3px solid var(--mag);background:#0b1220;color:var(--amber);font-size:14px;}
+.link-in{width:100%;max-width:100%;}

@@ -1,6 +1,7 @@
 import {HttpError} from "./errors.js";
 import * as L from "./logic.js";
 import * as B from "../../public/board.js";
+import {shareUrl,parseShareHtml} from "./share.js";
 const START=50,COOLDOWN=8000,MP="market/state";
 const SEED=[["fire","火","🔥",12],["water","水","💧",10],["earth","土","🪨",8],["wind","風","🌪️",9],["steam","蒸氣","♨️",18],["thunder","雷","⚡",15]];
 const bad=m=>new HttpError(400,"invalid-argument",m);
@@ -259,7 +260,7 @@ async function inject(d,a,{stockId,item}={}){
   });
 }
 // 練金工坊：買基礎元素（buy）、三物合成（craft）。背包 inv：{物品名稱:{n,e,lv}}；已發現的配方放在 recipes
-const MAX_BUY=100,REGISTRY="secret/items",MAX_DEFS=3000;   // REGISTRY：AI 創造過的物品名稱→{e,lv}（私密）。每個配方結果存在 recipes/{雜湊}（私密）
+const MAX_BUY=100,REGISTRY="secret/items",MAX_DEFS=3000,IMPORT_LV=1,IMPORT_PER_DAY=20;   // IMPORT：傳授連結的造物品階與每人每天上限   // REGISTRY：AI 創造過的物品名稱→{e,lv}（私密）。每個配方結果存在 recipes/{雜湊}（私密）
 const BASE_BY_NAME=Object.fromEntries(Object.entries(L.BASE_ITEMS).map(([id,x])=>[x.name,id]));
 // 沒有 AI 時的固定配方：三個都是基礎名稱 → 照元素規則；否則得到材料裡品階最高的那個
 function fallbackResult(defs){
@@ -267,8 +268,8 @@ function fallbackResult(defs){
   if(ids.every(Boolean))return {name:L.BASE_ITEMS[L.craftResult(ids)].name,...(({e,lv})=>({e,lv}))(L.BASE_ITEMS[L.craftResult(ids)])};
   const top=[...defs].sort((x,y)=>y.lv-x.lv||(x.name<y.name?-1:1))[0];return {name:top.name,e:top.e,lv:top.lv};
 }
-async function craft(d,a,{action,element,qty,items}={}){
-  if(!["buy","craft"].includes(action))throw bad("參數錯誤");
+async function craft(d,a,{action,element,qty,items,url}={}){
+  if(!["buy","craft","import"].includes(action))throw bad("參數錯誤");
   const pid=`players/${a.uid}`;
   return retry(async()=>{
     const p=await d.db.get(pid);await strikeIfDue(d,pid,p);
@@ -279,6 +280,24 @@ async function craft(d,a,{action,element,qty,items}={}){
       const b=L.BASE_ITEMS[element];inv[b.name]={n:Number(inv[b.name]?.n||0)+qty,e:b.e,lv:b.lv};const cash=Math.round((cash0-cost)*100)/100;
       await d.db.commit([{path:pid,data:{...base,cash,inv},pre:p?p.version:null}]);
       return {ok:true,cash,inv,cost};
+    }
+    if(action==="import"){   // 領取《無限煉製》的傳授連結：讀網頁標題取得造物名稱與圖示，放進背包
+      const su=shareUrl(url);if(!su)throw bad("連結格式不符，要像 https://pillars-of-creation.funtuan.work/s/XXXXXXXXXXXXXXXXXXXXXXXX");
+      const shares={...(p?.data.shares||{})},day=taipeiDay(d.now()),imp=p?.data.imp?.d===day?p.data.imp.n:0;
+      if(Object.hasOwn(shares,su.code))throw new HttpError(409,"failed-precondition","你已經領過這個傳授連結了");
+      if(imp>=IMPORT_PER_DAY)throw new HttpError(429,"resource-exhausted",`今天最多領 ${IMPORT_PER_DAY} 個傳授連結，明天再來`);
+      if(!d.fetchShare)throw new HttpError(503,"unavailable","目前無法讀取傳授連結");
+      let html;try{html=await d.fetchShare(su.url);}catch(e){console.error("share fetch failed",e?.message);throw new HttpError(502,"unavailable","讀不到這個連結（網頁打不開或已失效），請確認連結沒有過期");}
+      let g;try{g=parseShareHtml(html,d.now());}catch{throw bad("這不是《無限煉製》的傳授連結（網頁標題格式不符），可能已經失效");}
+      if(g.deadline!==null&&g.deadline<d.now())throw new HttpError(409,"failed-precondition","這個傳授連結已經過期了");
+      const reg=await d.db.get(REGISTRY),regDefs={...(reg?.data.defs||{})},recent=[...(reg?.data.recent||[])],baseId=BASE_BY_NAME[g.name],known=regDefs[g.name],extra=[];
+      let def={e:g.e,lv:IMPORT_LV};
+      if(baseId)def={e:L.BASE_ITEMS[baseId].e,lv:L.BASE_ITEMS[baseId].lv};else if(known)def={e:known.e,lv:known.lv};   // 基礎名稱與已登記的名稱沿用原本的圖示與品階
+      else{if(Object.keys(regDefs).length<MAX_DEFS)regDefs[g.name]=def;recent.push(g.name);extra.push({path:REGISTRY,data:{defs:regDefs,recent:recent.slice(-40)},pre:reg?reg.version:null});}
+      inv[g.name]={n:Number(inv[g.name]?.n||0)+1,e:def.e,lv:def.lv};
+      shares[su.code]=d.now();const keep=Object.entries(shares).sort((x,y)=>y[1]-x[1]).slice(0,200);   // 只留最近 200 個已領過的代碼
+      await d.db.commit([{path:pid,data:{...base,inv,shares:Object.fromEntries(keep),imp:{d:day,n:imp+1}},pre:p?p.version:null},...extra]);
+      return {ok:true,item:{name:g.name,e:def.e,lv:def.lv},sender:g.sender,inv};
     }
     if(!Array.isArray(items)||items.length!==3||items.some(x=>typeof x!=="string"||!L.validName(x)))throw bad("三物合成需要選 3 個物品");
     const need={};for(const x of items)need[x]=(need[x]||0)+1;

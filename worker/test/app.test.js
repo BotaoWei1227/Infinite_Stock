@@ -720,3 +720,64 @@ test("投入物品交給 AI 判斷相關度：同一組（物品×股票）只�
   x.db.m.set(`judged/${await sha("彩虹|wind")}`,{v:"j0",data:{i:"彩虹",s:"wind",rel:"great",score:90}});verdict={rel:"weak",score:30};x.t.v+=9000;
   assert.equal((await I("wind","彩虹")).body.rel,"weak");
 });
+
+// ================= 《無限煉製》傳授連結 =================
+import {shareUrl,parseShareHtml,decodeEntities,cleanName,SHARE_RE} from "../src/share.js";
+const URL1="https://pillars-of-creation.funtuan.work/s/KB6XY9FATJ9AYSMKTBAXSNMF";
+const page=(title,desc="")=>`<!doctype html><html><head><title>${title}</title>${desc?`<meta name="description" content="${desc}">`:""}</head><body></body></html>`;
+const GOOD=page("🎁 🪳 萌蟑螂 — 將軍的恩情還不完 傳授給你的造物","24 小時內免費領取，期限 10/31 19:27（台北時間）。");
+test("傳授連結：網址格式必須完全符合（https、正確網域、/s/ 加大寫代碼）；標題格式必須是「🎁 圖示 名稱 — 傳授者 傳授給你的造物」",()=>{
+  assert.deepEqual(shareUrl(` ${URL1} `),{code:"KB6XY9FATJ9AYSMKTBAXSNMF",url:URL1});
+  assert.equal(shareUrl(URL1+"/")?.code,"KB6XY9FATJ9AYSMKTBAXSNMF");assert.equal(shareUrl(URL1+"?ref=x#y")?.url,URL1);
+  for(const bad of ["http://pillars-of-creation.funtuan.work/s/KB6XY9FATJ9AYSMKTBAXSNMF","https://pillars-of-creation.funtuan.work.evil.com/s/KB6XY9FATJ9AYSMKTBAXSNMF","https://evil.com/https://pillars-of-creation.funtuan.work/s/KB6XY9FATJ9AYSMKTBAXSNMF","https://pillars-of-creation.funtuan.work/s/short","https://pillars-of-creation.funtuan.work/s/kb6xy9fatj9aysmktbaxsnmf","https://pillars-of-creation.funtuan.work/developer","https://user@pillars-of-creation.funtuan.work/s/KB6XY9FATJ9AYSMKTBAXSNMF","","abc",null,5])assert.equal(shareUrl(bad),null,String(bad));
+  const g=parseShareHtml(GOOD,Date.UTC(2026,9,30,12,0));
+  assert.deepEqual([g.name,g.e,g.sender],["萌蟑螂","🪳","將軍的恩情還不完"]);assert.equal(g.deadline,Date.UTC(2026,9,31,11,27));   // 10/31 19:27 台北時間
+  assert.equal(parseShareHtml(page("🎁 溫泉 — 小明 傳授給你的造物")).e,"✨");                                       // 沒有圖示 → 預設
+  assert.equal(parseShareHtml(page("🎁 👩‍🔬 實驗室 &amp; 工坊 — A &#39;B&#39; 傳授給你的造物")).name,"實驗室 & 工坊");  // HTML 實體與組合 emoji
+  for(const bad of [page("萌蟑螂 — 小明 傳授給你的造物"),page("🎁 🪳 萌蟑螂 傳授給你的造物"),page("🎁 🪳 萌蟑螂 — 小明"),page("Pillars of Creation"),"<html>沒有標題</html>",""])
+    assert.throws(()=>parseShareHtml(bad),/title|name/);
+  assert.equal(cleanName("a+b/c"),"a b c");assert.equal([...cleanName("超過十個字的造物名稱真的太長了")].length,10);assert.equal(cleanName("+/"),"");
+  assert.equal(decodeEntities("&lt;b&gt; &#x1F4A5; &unknown;"),"<b> 💥 &unknown;");assert.ok(SHARE_RE.test(URL1));
+});
+function shareGame(html=GOOD,o={}){const calls=[];const x=mk({fetchShare:async u=>{calls.push(u);if(html instanceof Error)throw html;return html;},...o});x.calls=calls;return x;}
+test("領取傳授連結：讀網頁標題，造物「萌蟑螂」放進背包；同一個連結同一個人只能領一次，別人可以領；之後可以合成、投入",async()=>{
+  const x=shareGame();x.t.v=Date.UTC(2026,9,30,12,0);await x.call("/ensure-market");seed(x.db,"g1",{cash:100,inv:{}});seed(x.db,"g2",{cash:100,inv:{}});
+  const r=await CR(x,{action:"import",url:URL1});
+  assert.equal(r.status,200);assert.deepEqual(r.body.item,{name:"萌蟑螂",e:"🪳",lv:1});assert.equal(r.body.sender,"將軍的恩情還不完");assert.deepEqual(x.calls,[URL1]);
+  assert.deepEqual(P(x.db).inv,{萌蟑螂:{n:1,e:"🪳",lv:1}});assert.equal(Object.keys(P(x.db).shares)[0],"KB6XY9FATJ9AYSMKTBAXSNMF");
+  assert.deepEqual(x.db.m.get("secret/items").data.defs,{萌蟑螂:{e:"🪳",lv:1}});
+  const again=await CR(x,{action:"import",url:URL1});assert.equal(again.status,409);assert.match(again.body.error.message,/已經領過/);assert.equal(x.calls.length,1);assert.equal(P(x.db).inv.萌蟑螂.n,1);   // 不會重複領、也不會再去抓網頁
+  x.state.uid="g2";assert.equal((await CR(x,{action:"import",url:URL1})).status,200);assert.equal(x.db.m.get("players/g2").data.inv.萌蟑螂.n,1);
+  // 領到的造物可以投入任何一檔股票
+  x.state.uid="g1";x.state.noSeed=true;x.t.v+=9000;assert.equal((await x.call("/inject",{stockId:"earth",item:"萌蟑螂"})).status,200);assert.equal(P(x.db).inv.萌蟑螂,undefined);
+});
+test("領取傳授連結：格式不符、頁面打不開、標題不對、已過期、每天上限、沒有設定讀取功能 都會被拒絕，且不扣不給",async()=>{
+  const x=shareGame();x.t.v=Date.UTC(2026,9,30,12,0);await x.call("/ensure-market");seed(x.db,"g1",{cash:100,inv:{}});
+  for(const bad of ["https://evil.com/s/KB6XY9FATJ9AYSMKTBAXSNMF","http://pillars-of-creation.funtuan.work/s/KB6XY9FATJ9AYSMKTBAXSNMF","隨便打",undefined,""])assert.equal((await CR(x,{action:"import",url:bad})).status,400);
+  assert.equal(x.calls.length,0);                                                                       // 格式不符時根本不會去抓網頁
+  const down=shareGame(new Error("HTTP 404"));down.t.v=x.t.v;await down.call("/ensure-market");seed(down.db,"g1",{cash:100,inv:{}});
+  const d=await CR(down,{action:"import",url:URL1});assert.equal(d.status,502);assert.match(d.body.error.message,/讀不到/);
+  const wrong=shareGame(page("Pillars of Creation — 無限煉製"));wrong.t.v=x.t.v;await wrong.call("/ensure-market");seed(wrong.db,"g1",{cash:100,inv:{}});
+  assert.equal((await CR(wrong,{action:"import",url:URL1})).status,400);
+  const old=shareGame();old.t.v=Date.UTC(2026,10,1,0,0);await old.call("/ensure-market");seed(old.db,"g1",{cash:100,inv:{}});                  // 11/1 已超過 10/31 19:27
+  const e=await CR(old,{action:"import",url:URL1});assert.equal(e.status,409);assert.match(e.body.error.message,/過期/);
+  for(const w of [down,wrong,old])assert.deepEqual(w.db.m.get("players/g1").data.inv,{});
+  const none=mk();await none.call("/ensure-market");seed(none.db,"g1",{cash:100});assert.equal((await CR(none,{action:"import",url:URL1})).status,503);
+  // 每天上限 20 個，隔天重算
+  const cap=shareGame(page("🎁 🪳 蟲 — A 傳授給你的造物"));cap.t.v=Date.UTC(2026,9,30,12,0);await cap.call("/ensure-market");seed(cap.db,"g1",{cash:100,inv:{}});
+  const codeOf=i=>"A".repeat(16)+String(i).padStart(4,"0");
+  for(let i=0;i<20;i++)assert.equal((await CR(cap,{action:"import",url:`https://pillars-of-creation.funtuan.work/s/${codeOf(i)}`})).status,200);
+  const over=await CR(cap,{action:"import",url:`https://pillars-of-creation.funtuan.work/s/${codeOf(99)}`});assert.equal(over.status,429);assert.match(over.body.error.message,/今天最多/);
+  cap.t.v+=24*H;assert.equal((await CR(cap,{action:"import",url:`https://pillars-of-creation.funtuan.work/s/${codeOf(99)}`})).status,200);
+  assert.equal(cap.db.m.get("players/g1").data.inv.蟲.n,21);
+});
+test("領取傳授連結：基礎名稱與已登記的名稱沿用原本的圖示與品階；名稱含保留字元或太長會被整理；服刑中不能領",async()=>{
+  const x=shareGame(page("🎁 💥 火 — A 傳授給你的造物"));await x.call("/ensure-market");seed(x.db,"g1",{cash:100,inv:{}});
+  assert.deepEqual((await CR(x,{action:"import",url:URL1})).body.item,{name:"火",e:"🔥",lv:0});            // 名稱是「火」→ 固定為基礎的火
+  x.db.m.set("secret/items",{v:"r0",data:{defs:{溫泉:{e:"♨️",lv:2}},recent:["溫泉"]}});
+  const y=shareGame(page("🎁 🛁 溫泉 — A 傳授給你的造物"));y.db.m.set("secret/items",x.db.m.get("secret/items"));await y.call("/ensure-market");seed(y.db,"g1",{cash:100,inv:{}});
+  assert.deepEqual((await CR(y,{action:"import",url:URL1})).body.item,{name:"溫泉",e:"♨️",lv:2});
+  const z=shareGame(page("🎁 🧪 超過十個字的造物名稱真的太長了+ — A 傳授給你的造物"));await z.call("/ensure-market");seed(z.db,"g1",{cash:100,inv:{}});
+  assert.equal((await CR(z,{action:"import",url:URL1})).body.item.name,"超過十個字的造物名稱");
+  x.db.m.get("players/g1").data.jailUntil=x.t.v+H;assert.equal((await CR(x,{action:"import",url:URL1+"?x=1"})).status,403);
+});
