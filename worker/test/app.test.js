@@ -781,3 +781,37 @@ test("領取傳授連結：基礎名稱與已登記的名稱沿用原本的圖�
   assert.equal((await CR(z,{action:"import",url:URL1})).body.item.name,"超過十個字的造物名稱");
   x.db.m.get("players/g1").data.jailUntil=x.t.v+H;assert.equal((await CR(x,{action:"import",url:URL1+"?x=1"})).status,403);
 });
+
+// ================= 玩家自己綁定的 Gemini API Key（選用） =================
+const GK="AIzaSyTestKey_1234567890abcdefghij";
+test("綁定自己的 Gemini Key：合成與投入優先用玩家的 Key；沒有伺服器 Key 也能用；Key 不會存進任何文件",async()=>{
+  const seen=[];
+  const x=mk({serverAI:false,craftAI:async(req,k)=>{seen.push(["craft",k]);return {name:"溫泉",e:"♨️",lv:1,reason:"x"};},judgeAI:async(req,k)=>{seen.push(["judge",k]);return {rel:"strong",score:80};}});
+  await x.call("/ensure-market");seed(x.db,"g1",{cash:100,inv:bagOf({fire:2,water:1})});x.state.noSeed=true;
+  assert.equal((await CR(x,{action:"craft",items:["水","火","火"],geminiKey:GK})).body.result.name,"溫泉");
+  x.t.v+=9000;assert.equal((await x.call("/inject",{stockId:"water",item:"溫泉",geminiKey:GK})).status,200);
+  assert.deepEqual(seen,[["craft",GK],["judge",GK]]);
+  assert.equal(JSON.stringify([...x.db.m]).includes(GK),false);                                  // 資料庫裡到處都找不到這把 Key
+  // 沒有伺服器 Key、玩家也沒綁 → 不呼叫 AI：合成退回固定配方、投入退回名稱比對
+  const y=mk({serverAI:false,craftAI:async()=>{throw new Error("不該被呼叫");},judgeAI:async()=>{throw new Error("不該被呼叫");}});
+  await y.call("/ensure-market");seed(y.db,"g1",{cash:100,inv:bagOf({fire:1,water:1,wind:1})});
+  assert.equal((await CR(y,{action:"craft",items:["火","水","風"]})).body.byAI,false);
+  // 伺服器有 Key、玩家沒綁 → 傳給 AI 的 Key 是空的（由伺服器補上自己的）
+  const z=mk({serverAI:true,craftAI:async(req,k)=>{seen.push(["server",k]);return {name:"泥巴",e:"🟤",lv:0,reason:"x"};}});
+  await z.call("/ensure-market");seed(z.db,"g1",{cash:100,inv:bagOf({earth:3})});await CR(z,{action:"craft",items:["土","土","土"]});assert.equal(seen.at(-1)[1],null);
+});
+test("綁定自己的 Gemini Key：格式不對 400；Key 無效／沒權限 400、額度用完 429 並說清楚是玩家自己的 Key；伺服器 Key 出問題仍是 503；失敗不扣材料",async()=>{
+  let err="Gemini 403";
+  const x=mk({craftAI:async()=>{throw new Error(err);},judgeAI:async()=>{throw new Error(err);}});await x.call("/ensure-market");
+  seed(x.db,"g1",{cash:100,inv:{...bagOf({fire:1,water:1,wind:1}),溫泉:{n:1,e:"♨️",lv:1}}});x.state.noSeed=true;
+  for(const bad of ["short","a b c d e f g h i j k l m n o","金鑰金鑰金鑰金鑰金鑰金鑰金鑰金鑰金鑰金鑰",5,{},"x".repeat(201)]){
+    assert.equal((await CR(x,{action:"craft",items:["火","水","風"],geminiKey:bad})).status,400,String(bad));
+    assert.equal((await x.call("/inject",{stockId:"water",item:"溫泉",geminiKey:bad})).status,400);
+  }
+  for(const e of ["Gemini 400","Gemini 401","Gemini 403"]){err=e;const r=await CR(x,{action:"craft",items:["火","水","風"],geminiKey:GK});assert.equal(r.status,400);assert.match(r.body.error.message,/你綁定的 Gemini API Key 無效/);}
+  err="Gemini 429";let r=await CR(x,{action:"craft",items:["火","水","風"],geminiKey:GK});assert.equal(r.status,429);assert.match(r.body.error.message,/你的 Gemini API Key 額度用完/);
+  x.t.v+=9000;r=await x.call("/inject",{stockId:"water",item:"溫泉",geminiKey:GK});assert.equal(r.status,429);
+  err="Gemini 403";x.t.v+=9000;r=await CR(x,{action:"craft",items:["火","水","風"]});assert.equal(r.status,503);assert.match(r.body.error.message,/材料沒有扣/);   // 沒綁 Key：是伺服器的問題
+  assert.equal(Object.keys(P(x.db).inv).length,4);assert.equal(P(x.db).inv.溫泉.n,1);assert.equal(JSON.stringify([...x.db.m]).includes(GK),false);
+  assert.equal((await CR(x,{action:"buy",element:"fire",qty:1,geminiKey:"壞的"})).status,200);          // 買材料不看 Key
+});

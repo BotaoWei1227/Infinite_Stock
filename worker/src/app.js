@@ -221,10 +221,21 @@ async function strikeIfDue(d,pid,p){
 // 開發者：以 Google 驗證過的信箱比對（名單在機密 DEV_EMAILS），投入元素不需要材料
 const isDev=(d,a)=>a.emailVerified===true&&typeof a.email==="string"&&(d.devEmails||[]).includes(a.email.toLowerCase());
 const sha=async t=>[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(t)))].map(b=>b.toString(16).padStart(2,"0")).join("").slice(0,40);
+// 玩家自己綁定的 Gemini API Key（選用）：只在這次請求用來呼叫 Gemini，伺服器不儲存、不寫進任何紀錄。沒綁定就用伺服器的 Key
+const GKEY_RE=/^[A-Za-z0-9_\-]{20,200}$/;
+const userKeyOf=raw=>{if(raw===undefined||raw===null||raw==="")return null;if(typeof raw!=="string"||!GKEY_RE.test(raw))throw bad("Gemini API Key 格式不正確，請到「設定」重新綁定");return raw;};
+const canAI=(fn,d,uk)=>!!fn&&(!!uk||d.serverAI!==false);   // 有函式，而且有玩家的 Key 或伺服器有設定 Key
+function aiError(e,uk,msg){   // 玩家的 Key 出問題要明確告訴他；其他一律當作 AI 暫時失敗
+  const st=Number(/Gemini (\d{3})/.exec(e?.message||"")?.[1]||0);
+  if(uk&&[400,401,403].includes(st))return new HttpError(400,"invalid-argument","你綁定的 Gemini API Key 無效或沒有權限，請到「設定」重新綁定");
+  if(uk&&st===429)return new HttpError(429,"resource-exhausted","你的 Gemini API Key 額度用完了，稍後再試");
+  return new HttpError(503,"unavailable",msg);
+}
 // 投入物品：消耗背包裡 1 個物品，投入任何一檔股票。AI 判斷「物品和這檔股票的主題有多相關」（同一組只判一次，結果記在私密集合 judged），
 // 相關度高過門檻 → 提高上漲機率，沒高過 → 反而壓低；品階越高力道越大。不直接改價格
-async function inject(d,a,{stockId,item}={}){
+async function inject(d,a,{stockId,item,geminiKey}={}){
   if(!/^[a-z]{2,20}$/.test(stockId||"")||!L.ELEMENTS.includes(stockId))throw bad("參數錯誤");
+  const uk=userKeyOf(geminiKey);
   const dev=isDev(d,a),pid=`players/${a.uid}`;
   return retry(async()=>{
     const [p,m,o]=await Promise.all([d.db.get(pid),d.db.get(MP),loadOdds(d)]);
@@ -241,9 +252,9 @@ async function inject(d,a,{stockId,item}={}){
     // 相關度：先查快取，沒有才問 AI；沒設定 AI 時，物品名稱和股票名稱相同才算直接相關
     const jp=`judged/${await sha(name+"|"+stockId)}`,jd=await d.db.get(jp),extra=[];let rel,score;
     if(jd&&L.REL_RANGE[jd.data.rel]){rel=jd.data.rel;score=L.relScore(rel,jd.data.score);}
-    else if(d.judgeAI){
-      let v;try{v=await d.judgeAI({item:name,stock:{id:stockId,name:s.name}});}
-      catch(err){console.error("judge failed",err?.message);throw new HttpError(503,"unavailable","AI 暫時沒辦法判定，物品沒有扣，請稍後再試");}
+    else if(canAI(d.judgeAI,d,uk)){
+      let v;try{v=await d.judgeAI({item:name,stock:{id:stockId,name:s.name}},uk);}
+      catch(err){console.error("judge failed",err?.message);throw aiError(err,uk,"AI 暫時沒辦法判定，物品沒有扣，請稍後再試");}
       rel=v.rel;score=L.relScore(v.rel,v.score);extra.push({path:jp,data:{i:name,s:stockId,rel,score},pre:jd?jd.version:null});
     }else{rel=name===s.name?"direct":"none";score=rel==="direct"?100:5;}
     const now=d.now(),cfg=settingsOf(o),pass=L.passes(score,cfg.threshold);
@@ -268,8 +279,9 @@ function fallbackResult(defs){
   if(ids.every(Boolean))return {name:L.BASE_ITEMS[L.craftResult(ids)].name,...(({e,lv})=>({e,lv}))(L.BASE_ITEMS[L.craftResult(ids)])};
   const top=[...defs].sort((x,y)=>y.lv-x.lv||(x.name<y.name?-1:1))[0];return {name:top.name,e:top.e,lv:top.lv};
 }
-async function craft(d,a,{action,element,qty,items,url}={}){
+async function craft(d,a,{action,element,qty,items,url,geminiKey}={}){
   if(!["buy","craft","import"].includes(action))throw bad("參數錯誤");
+  const uk=action==="craft"?userKeyOf(geminiKey):null;
   const pid=`players/${a.uid}`;
   return retry(async()=>{
     const p=await d.db.get(pid);await strikeIfDue(d,pid,p);
@@ -304,13 +316,13 @@ async function craft(d,a,{action,element,qty,items,url}={}){
     for(const [n,c] of Object.entries(need))if(Number(inv[n]?.n||0)<c)throw new HttpError(409,"failed-precondition",`物品不夠：需要 ${c} 個「${n}」，你只有 ${Number(inv[n]?.n||0)} 個`);
     const defs=items.map(n=>({name:n,e:inv[n].e,lv:inv[n].lv})),maxLv=Math.max(...defs.map(x=>x.lv));
     const key=L.itemKey(items),extra=[];let result=fallbackResult(defs),reason="",byAI=false;
-    if(d.craftAI){
+    if(canAI(d.craftAI,d,uk)){
       const rp=`recipes/${await sha(key)}`,rd=await d.db.get(rp),h=rd?.data;
       if(h&&L.validName(h.n)&&Number.isInteger(h.lv)){result={name:h.n,e:h.e,lv:h.lv};reason=h.w||"";}
       else{
         const reg=await d.db.get(REGISTRY),regDefs={...(reg?.data.defs||{})},recent=[...(reg?.data.recent||[])];
-        let v;try{v=await d.craftAI({items:[...defs].sort((x,y)=>x.name<y.name?-1:1),avoid:[...recent]});}
-        catch(e){console.error("craft judge failed",e?.message);throw new HttpError(503,"unavailable","煉金師暫時沒辦法判定這個組合，材料沒有扣，請稍後再試");}
+        let v;try{v=await d.craftAI({items:[...defs].sort((x,y)=>x.name<y.name?-1:1),avoid:[...recent]},uk);}
+        catch(e){console.error("craft judge failed",e?.message);throw aiError(e,uk,"煉金師暫時沒辦法判定這個組合，材料沒有扣，請稍後再試");}
         let {name,e,lv}=v;reason=v.reason||"";
         const baseId=BASE_BY_NAME[name],known=regDefs[name];
         if(baseId){e=L.BASE_ITEMS[baseId].e;lv=L.BASE_ITEMS[baseId].lv;}                // 基礎名稱固定圖示與品階

@@ -29,11 +29,20 @@ async function gLogin(){
 }
 
 // ---------- 伺服器端行動（Worker 驗證 Google 登入並計算行情） ----------
+// 自己的 Gemini API Key（選用）：只存在這支手機的瀏覽器（localStorage，不行就退回分頁暫存），不會存到伺服器。
+// 只有「合成」與「投入物品」的請求會帶上它，伺服器拿來呼叫 Gemini 後就丟掉；沒綁定就用伺服器的額度。
+const GKEY_OK=/^[A-Za-z0-9_\-]{20,200}$/;
+const K=(()=>{
+  let persist=true;try{localStorage.setItem("_t","1");localStorage.removeItem("_t");}catch{persist=false;}
+  const st=()=>persist?localStorage:sessionStorage;
+  return {get:()=>{try{return st().getItem("gkey")||"";}catch{return "";}},set:v=>{try{st().setItem("gkey",v);return true;}catch{return false;}},clear:()=>{try{localStorage.removeItem("gkey");sessionStorage.removeItem("gkey");}catch{}},persistent:persist};
+})();
+const maskKey=k=>k?`${k.slice(0,4)}…${k.slice(-4)}`:"";
 async function act(name,data){
   if(busy)return null;if(!user){say("請先以 Google 帳號登入");return null;}
   busy=true;say("處理中…");render();
   try{
-    const r=await fetch(CFG.api+"/"+name,{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:JSON.stringify(data)});
+    const r=await fetch(CFG.api+"/"+name,{method:"POST",headers:{Authorization:"Bearer "+await user.getIdToken(),"Content-Type":"application/json"},body:JSON.stringify((name==="craft"||name==="inject")&&K.get()?{...data,geminiKey:K.get()}:data)});
     const j=await r.json().catch(()=>({}));
     if(!r.ok)throw new Error(j.error?.message||("HTTP "+r.status));
     return j;
@@ -383,6 +392,7 @@ function renderWork(){
   const v=$("v-work");v.replaceChildren();
   const bag=bagOf(),used=n=>slots.filter(x=>x===n).length,left=n=>(bag[n]?.n||0)-used(n);
   const chip=(n,onclick,extra="")=>el("button",{type:"button",class:"echip btn",disabled:busy||!onclick,"aria-label":`${n}${extra}`,onclick,text:`${bag[n]?.e||""} ${n}${stars(bag[n]?.lv)}${extra}`});
+  if(!K.get())v.append(el("p",{class:"mu"},document.createTextNode("💡 合成靠 AI（Gemini）。想用自己的額度，可以到「設定」綁定自己的 Gemini API Key。 "),el("button",{class:"px-btn",type:"button",text:"前往設定",onclick:()=>setView("set")})));
   // 1. 背包
   const bagWin=el("section",{class:"win","aria-label":"背包"});bagWin.append(winBar("📦 BACKPACK.EXE"));
   const have=bagList().map(([n])=>n),bb=el("div",{class:"body"});
@@ -439,6 +449,16 @@ function renderSet(){
   const saveName=el("button",{class:"px-btn pri",type:"button",text:"儲存名稱",disabled:!user,onclick:async()=>{const r=await act("profile",{name:pname.value});if(r){me.customName=r.name;say("排行榜名稱已更新");renderSet();}}});
   const body=el("div",{class:"body"},el("h2",{class:"h2",text:"玩家名稱"}),el("p",{class:"mu",text:user?"排行榜會顯示這個名稱；留空不允許。最多 20 字。":"登入後即可設定排行榜顯示名稱。"}),pname,saveName,
     el("h2",{class:"h2",text:"介面大小"}),seg,
+    el("h2",{class:"h2",text:"Gemini API Key 綁定（選用）"}),
+    el("p",{class:"mu",text:"合成新物品和判斷投入的相關度都是 AI（Gemini）做的。綁定你自己的 Key，就會用你的免費額度；沒綁定就用伺服器的額度，額度用完時會暫時不能用。"}),
+    el("p",{class:"mu",text:"Key 只存在這支手機的瀏覽器裡，不會存到伺服器；只有合成與投入物品時會隨請求送出，伺服器用完就丟，也不寫進任何紀錄。到 https://aistudio.google.com/apikey 可以免費申請。"}),
+    ...(()=>{
+      const cur=K.get(),inp=el("input",{class:"px-in",type:"password",autocomplete:"off",autocapitalize:"off",spellcheck:"false",placeholder:"AIza…","aria-label":"Gemini API Key"});
+      const msg=el("p",{class:"mu",role:"status",text:cur?`✅ 已綁定：${maskKey(cur)}${K.persistent?"":"（這個瀏覽器無法長期儲存，關掉分頁就會消失）"}`:"目前沒有綁定，使用伺服器的額度。"});
+      const save=el("button",{class:"px-btn pri",type:"button",text:"綁定",onclick:()=>{const v=inp.value.trim();if(!GKEY_OK.test(v)){msg.textContent="⚠ Key 格式不正確（只能有英數、底線、減號，至少 20 字）。";return;}if(!K.set(v)){msg.textContent="⚠ 這個瀏覽器不允許儲存，無法綁定。";return;}inp.value="";say("已綁定 Gemini API Key");renderSet();}});
+      const clr=el("button",{class:"px-btn",type:"button",text:"解除綁定",disabled:!cur,onclick:()=>{K.clear();say("已解除綁定，改用伺服器的額度");renderSet();}});
+      return [inp,el("div",{class:"row"},save,clr),msg];
+    })(),
     el("h2",{class:"h2",text:"新聞跑馬燈"}),el("p",{class:"mu",text:"有新聞發布時，頁面最上方會滾動顯示標題。"}),
     el("div",{class:"seg",role:"group","aria-label":"新聞跑馬燈"},...[[true,"開啟"],[false,"關閉"]].map(([on,name])=>el("button",{class:"px-btn",type:"button","aria-pressed":String(on===!tickerOff),text:name,onclick:()=>setTicker(on)}))));
   w.append(body);

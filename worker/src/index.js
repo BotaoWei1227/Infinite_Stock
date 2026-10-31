@@ -13,8 +13,9 @@ const deps=env=>({
     if(r.status!==200)throw new Error("HTTP "+r.status);
     return (await r.text()).slice(0,200000);
   },
-  craftAI:env.GEMINI_API_KEY?req=>craftJudge(fetch,env.GEMINI_API_KEY,req):null,
-  judgeAI:env.GEMINI_API_KEY?req=>judgeRelevance(fetch,env.GEMINI_API_KEY,req):null,   // 沒設 Key 時：物品名稱和股票名稱相同才算直接相關   // 沒設 Key 時退回 logic.js 的固定配方
+  serverAI:!!env.GEMINI_API_KEY,   // 伺服器有沒有設定 Key；玩家也可以在設定綁定自己的 Key（一次請求用完就丟）
+  craftAI:(req,k)=>craftJudge(fetch,k||env.GEMINI_API_KEY,req),
+  judgeAI:(req,k)=>judgeRelevance(fetch,k||env.GEMINI_API_KEY,req),   // 沒有任何 Key 時：物品名稱和股票名稱相同才算直接相關，合成退回固定配方
   devEmails:(env.DEV_EMAILS||"").split(",").map(x=>x.trim().toLowerCase()).filter(Boolean)   // 機密，不放在倉庫裡
 });
 export default {
