@@ -31,12 +31,14 @@ async function gLogin(){
 // ---------- 伺服器端行動（Worker 驗證 Google 登入並計算行情） ----------
 // 自己的 Gemini API Key（選用）：只存在這支手機的瀏覽器（localStorage，不行就退回分頁暫存），不會存到伺服器。
 // 只有「合成」與「投入物品」的請求會帶上它，伺服器拿來呼叫 Gemini 後就丟掉；沒綁定就用伺服器的額度。
-const GKEY_OK=/^[A-Za-z0-9_\-]{20,200}$/;
+const GKEY_OK=/^[\x21-\x7E]{1,512}$/;   // 不限制 Key 的格式，只擋空白、中文、換行這些放進標頭會出錯的字元
 const K=(()=>{
   let persist=true;try{localStorage.setItem("_t","1");localStorage.removeItem("_t");}catch{persist=false;}
   const st=()=>persist?localStorage:sessionStorage;
   return {get:()=>{try{return st().getItem("gkey")||"";}catch{return "";}},set:v=>{try{st().setItem("gkey",v);return true;}catch{return false;}},clear:()=>{try{localStorage.removeItem("gkey");sessionStorage.removeItem("gkey");}catch{}},persistent:persist};
 })();
+const KEY_URL="https://aistudio.google.com/apikey";   // 官方申請 Key 的頁面
+const keyLink=text=>el("a",{class:"px-btn pri",href:KEY_URL,target:"_blank",rel:"noopener noreferrer",text,"aria-label":`${text}（會在新分頁開啟 Google AI Studio）`});
 const maskKey=k=>k?`${k.slice(0,4)}…${k.slice(-4)}`:"";
 async function act(name,data){
   if(busy)return null;if(!user){say("請先以 Google 帳號登入");return null;}
@@ -392,7 +394,7 @@ function renderWork(){
   const v=$("v-work");v.replaceChildren();
   const bag=bagOf(),used=n=>slots.filter(x=>x===n).length,left=n=>(bag[n]?.n||0)-used(n);
   const chip=(n,onclick,extra="")=>el("button",{type:"button",class:"echip btn",disabled:busy||!onclick,"aria-label":`${n}${extra}`,onclick,text:`${bag[n]?.e||""} ${n}${stars(bag[n]?.lv)}${extra}`});
-  if(!K.get())v.append(el("p",{class:"mu"},document.createTextNode("💡 合成靠 AI（Gemini）。想用自己的額度，可以到「設定」綁定自己的 Gemini API Key。 "),el("button",{class:"px-btn",type:"button",text:"前往設定",onclick:()=>setView("set")})));
+  if(!K.get())v.append(el("p",{class:"mu"},document.createTextNode("💡 合成靠 AI（Gemini）。想用自己的額度，可以先去拿一把 Gemini API Key，再到「設定」綁定。 "),keyLink("🔑 取得 Key"),el("button",{class:"px-btn",type:"button",text:"前往設定",onclick:()=>setView("set")})));
   // 1. 背包
   const bagWin=el("section",{class:"win","aria-label":"背包"});bagWin.append(winBar("📦 BACKPACK.EXE"));
   const have=bagList().map(([n])=>n),bb=el("div",{class:"body"});
@@ -451,11 +453,12 @@ function renderSet(){
     el("h2",{class:"h2",text:"介面大小"}),seg,
     el("h2",{class:"h2",text:"Gemini API Key 綁定（選用）"}),
     el("p",{class:"mu",text:"合成新物品和判斷投入的相關度都是 AI（Gemini）做的。綁定你自己的 Key，就會用你的免費額度；沒綁定就用伺服器的額度，額度用完時會暫時不能用。"}),
-    el("p",{class:"mu",text:"Key 只存在這支手機的瀏覽器裡，不會存到伺服器；只有合成與投入物品時會隨請求送出，伺服器用完就丟，也不寫進任何紀錄。到 https://aistudio.google.com/apikey 可以免費申請。"}),
+    el("p",{class:"mu",text:"Key 只存在這支手機的瀏覽器裡，不會存到伺服器；只有合成與投入物品時會隨請求送出，伺服器用完就丟，也不寫進任何紀錄。按下面的按鈕會在新分頁開啟 Google 的申請頁面，登入後建立 Key、複製，再回來貼在這裡。"}),
+    el("div",{class:"row"},keyLink("🔑 前往取得 API Key")),
     ...(()=>{
       const cur=K.get(),inp=el("input",{class:"px-in",type:"password",autocomplete:"off",autocapitalize:"off",spellcheck:"false",placeholder:"AIza…","aria-label":"Gemini API Key"});
       const msg=el("p",{class:"mu",role:"status",text:cur?`✅ 已綁定：${maskKey(cur)}${K.persistent?"":"（這個瀏覽器無法長期儲存，關掉分頁就會消失）"}`:"目前沒有綁定，使用伺服器的額度。"});
-      const save=el("button",{class:"px-btn pri",type:"button",text:"綁定",onclick:()=>{const v=inp.value.trim();if(!GKEY_OK.test(v)){msg.textContent="⚠ Key 格式不正確（只能有英數、底線、減號，至少 20 字）。";return;}if(!K.set(v)){msg.textContent="⚠ 這個瀏覽器不允許儲存，無法綁定。";return;}inp.value="";say("已綁定 Gemini API Key");renderSet();}});
+      const save=el("button",{class:"px-btn pri",type:"button",text:"綁定",onclick:()=>{const v=inp.value.trim();if(!GKEY_OK.test(v)){msg.textContent="⚠ Key 不能是空的，也不能有空白、中文或換行（請確認有完整複製、前後沒有多餘的字）。";return;}if(!K.set(v)){msg.textContent="⚠ 這個瀏覽器不允許儲存，無法綁定。";return;}inp.value="";say("已綁定 Gemini API Key");renderSet();}});
       const clr=el("button",{class:"px-btn",type:"button",text:"解除綁定",disabled:!cur,onclick:()=>{K.clear();say("已解除綁定，改用伺服器的額度");renderSet();}});
       return [inp,el("div",{class:"row"},save,clr),msg];
     })(),

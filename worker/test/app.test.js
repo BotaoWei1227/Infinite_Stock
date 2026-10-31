@@ -784,6 +784,14 @@ test("領取傳授連結：基礎名稱與已登記的名稱沿用原本的圖�
 
 // ================= 玩家自己綁定的 Gemini API Key（選用） =================
 const GK="AIzaSyTestKey_1234567890abcdefghij";
+test("AI 模型：所有 Gemini 呼叫（新聞、合成、相關度）都用 gemini-3.5-flash-lite，且請求不帶 temperature",async()=>{
+  const urls=[];const f=body=>async(u,o)=>{urls.push(u);assert.equal("temperature" in (JSON.parse(o.body).generationConfig||{}),false);return gem(body)();};
+  const K="k".repeat(12);
+  await craftJudge(f({name:"溫泉",e:"♨️",lv:1,reason:"x"}),K,IN("火","水","土"));
+  await judgeRelevance(f({tier:"strong",score:70}),K,{item:"溫泉",stock:{id:"water",name:"水"}});
+  await aiAutoNews(f({title:"賢者之塔宣布火焰免稅",body:"【賢者之塔連線報導】"+"內文".repeat(40),effects:{fire:3}}),K,[{id:"fire",name:"火"}],10,"2027-01-15");
+  assert.equal(urls.length,3);for(const u of urls)assert.match(u,/\/models\/gemini-3\.5-flash-lite:generateContent$/);
+});
 test("綁定自己的 Gemini Key：合成與投入優先用玩家的 Key；沒有伺服器 Key 也能用；Key 不會存進任何文件",async()=>{
   const seen=[];
   const x=mk({serverAI:false,craftAI:async(req,k)=>{seen.push(["craft",k]);return {name:"溫泉",e:"♨️",lv:1,reason:"x"};},judgeAI:async(req,k)=>{seen.push(["judge",k]);return {rel:"strong",score:80};}});
@@ -800,11 +808,11 @@ test("綁定自己的 Gemini Key：合成與投入優先用玩家的 Key；沒�
   const z=mk({serverAI:true,craftAI:async(req,k)=>{seen.push(["server",k]);return {name:"泥巴",e:"🟤",lv:0,reason:"x"};}});
   await z.call("/ensure-market");seed(z.db,"g1",{cash:100,inv:bagOf({earth:3})});await CR(z,{action:"craft",items:["土","土","土"]});assert.equal(seen.at(-1)[1],null);
 });
-test("綁定自己的 Gemini Key：格式不對 400；Key 無效／沒權限 400、額度用完 429 並說清楚是玩家自己的 Key；伺服器 Key 出問題仍是 503；失敗不扣材料",async()=>{
+test("綁定自己的 Gemini Key：不限制格式（短的、含各種符號、新格式都放行）；只擋空白／中文／換行／過長；Key 無效／沒權限 400、額度用完 429 並說清楚是玩家自己的 Key；伺服器 Key 出問題仍是 503；失敗不扣材料",async()=>{
   let err="Gemini 403";
   const x=mk({craftAI:async()=>{throw new Error(err);},judgeAI:async()=>{throw new Error(err);}});await x.call("/ensure-market");
   seed(x.db,"g1",{cash:100,inv:{...bagOf({fire:1,water:1,wind:1}),溫泉:{n:1,e:"♨️",lv:1}}});x.state.noSeed=true;
-  for(const bad of ["short","a b c d e f g h i j k l m n o","金鑰金鑰金鑰金鑰金鑰金鑰金鑰金鑰金鑰金鑰",5,{},"x".repeat(201)]){
+  for(const bad of ["a b c","金鑰金鑰金鑰金鑰","key\nwith-newline","tab\there",5,{},"x".repeat(513)," AIza"]){
     assert.equal((await CR(x,{action:"craft",items:["火","水","風"],geminiKey:bad})).status,400,String(bad));
     assert.equal((await x.call("/inject",{stockId:"water",item:"溫泉",geminiKey:bad})).status,400);
   }
@@ -814,4 +822,13 @@ test("綁定自己的 Gemini Key：格式不對 400；Key 無效／沒權限 400
   err="Gemini 403";x.t.v+=9000;r=await CR(x,{action:"craft",items:["火","水","風"]});assert.equal(r.status,503);assert.match(r.body.error.message,/材料沒有扣/);   // 沒綁 Key：是伺服器的問題
   assert.equal(Object.keys(P(x.db).inv).length,4);assert.equal(P(x.db).inv.溫泉.n,1);assert.equal(JSON.stringify([...x.db.m]).includes(GK),false);
   assert.equal((await CR(x,{action:"buy",element:"fire",qty:1,geminiKey:"壞的"})).status,200);          // 買材料不看 Key
+  // 各種「新格式」的 Key 都能傳給 AI，不由我們判斷對不對（由 Google 回應）
+  const seen=[];const y=mk({craftAI:async(req,k)=>{seen.push(k);return {name:"溫泉",e:"♨️",lv:1,reason:"x"};}});await y.call("/ensure-market");
+  seed(y.db,"g1",{cash:100,inv:bagOf({fire:3})});
+  for(const k of ["a","short","AQ.Ab8RN6K-new_Format.key~with+symbols/=","x".repeat(512),"AIzaSyTestKey_1234567890abcdefghij"]){
+    y.db.m.get("players/g1").data.inv=bagOf({fire:3});y.db.m.delete?.([...y.db.m.keys()].find(q=>q.startsWith("recipes/")));
+    for(const q of [...y.db.m.keys()])if(q.startsWith("recipes/"))y.db.m.delete(q);
+    assert.equal((await CR(y,{action:"craft",items:["火","火","火"],geminiKey:k})).status,200,k.slice(0,12));
+  }
+  assert.equal(seen.length,5);assert.equal(seen[1],"short");assert.equal(seen[3].length,512);
 });

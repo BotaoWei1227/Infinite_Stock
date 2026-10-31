@@ -1,6 +1,7 @@
 import {MAX_LV,normName,validName} from "../../public/items.js";
 // 伺服器端的 Gemini 呼叫（金鑰只存在 Cloudflare Secret GEMINI_API_KEY）：自動撰寫財經新聞、創造三物合成的新物品、判斷投入物品與股票的相關度。
-export const NEWS_MODEL="gemini-3.6-flash";   // 這個模型已停用 temperature 參數，請求中不要帶
+// 全部 AI 呼叫共用同一個模型：Flash-Lite（快、便宜、額度寬）。要換成 gemini-3.6-flash 只要改這一行。這兩個模型都已停用 temperature 參數，請求中不要帶。
+export const GEMINI_MODEL="gemini-3.5-flash-lite";
 // 自動財經新聞：台北時間 10/14/18/22 點各一則，由 AI 依世界觀撰寫，並對 1～2 檔股票微調上漲基準機率（±1～±30 個百分點，依新聞嚴重程度）
 export const AUTO_NEWS_MAX=30;
 export async function autoNews(fetchFn,key,stocks,slot,date){
@@ -11,7 +12,7 @@ export async function autoNews(fetchFn,key,stocks,slot,date){
 日期：${date}。事件要有創意，必須和上列至少一檔股票的主題有關。人物與組織全部虛構（可以出現練金村主人 Funtuan），不得使用任何現實中的真人、政治人物或現實公司。內文不得提到機率、百分比預測或「上漲／下跌機率」。
 另外請決定這則新聞對哪 1～2 檔股票有利多或利空：effects 的鍵是股票代號，值是 -${AUTO_NEWS_MAX} 到 ${AUTO_NEWS_MAX} 的非零整數（正數利多、負數利空，方向要與新聞內容一致；幅度依事件嚴重程度決定：小事 ±5～10、中型事件 ±10～20、震撼全市場的大事 ±20～${AUTO_NEWS_MAX}，不要每則都給最大值）。
 只回傳 JSON：{"title":"標題（8～30 字）","body":"內文","effects":{"股票代號":整數}}`;
-  const r=await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/${NEWS_MODEL}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json"}})});
+  const r=await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json"}})});
   if(!r.ok)throw new Error(`Gemini ${r.status}`);
   const j=await r.json(),raw=(j.candidates?.[0]?.content?.parts||[]).map(p=>p.text||"").join("");
   let x;try{x=JSON.parse(raw.replace(/```json|```/g,"").trim());}catch{throw new Error("invalid news response");}
@@ -67,7 +68,7 @@ export async function judgeRelevance(fetchFn,key,{item,stock}={}){
   return {rel:x.tier,score:Number(x.score)};
 }
 async function askGemini(fetchFn,key,prompt,what){
-  const r=await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/${NEWS_MODEL}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json"}})});
+  const r=await fetchFn(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,{method:"POST",headers:{"Content-Type":"application/json","x-goog-api-key":key},body:JSON.stringify({contents:[{parts:[{text:prompt}]}],generationConfig:{responseMimeType:"application/json"}})});
   if(!r.ok)throw new Error(`Gemini ${r.status}`);
   const j=await r.json(),raw=(j.candidates?.[0]?.content?.parts||[]).map(p=>p.text||"").join("");
   try{return JSON.parse(raw.replace(/```json|```/g,"").trim())||{};}catch{throw new Error(`invalid ${what} response`);}

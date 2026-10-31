@@ -222,8 +222,9 @@ async function strikeIfDue(d,pid,p){
 const isDev=(d,a)=>a.emailVerified===true&&typeof a.email==="string"&&(d.devEmails||[]).includes(a.email.toLowerCase());
 const sha=async t=>[...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(t)))].map(b=>b.toString(16).padStart(2,"0")).join("").slice(0,40);
 // 玩家自己綁定的 Gemini API Key（選用）：只在這次請求用來呼叫 Gemini，伺服器不儲存、不寫進任何紀錄。沒綁定就用伺服器的 Key
-const GKEY_RE=/^[A-Za-z0-9_\-]{20,200}$/;
-const userKeyOf=raw=>{if(raw===undefined||raw===null||raw==="")return null;if(typeof raw!=="string"||!GKEY_RE.test(raw))throw bad("Gemini API Key 格式不正確，請到「設定」重新綁定");return raw;};
+// 不限制 Key 的格式（Google 的 Key 格式會改）。只擋放進 HTTP 標頭會出錯的字元：空白、中文、控制字元；長度上限 512
+const GKEY_RE=/^[\x21-\x7E]{1,512}$/;
+const userKeyOf=raw=>{if(raw===undefined||raw===null||raw==="")return null;if(typeof raw!=="string"||!GKEY_RE.test(raw))throw bad("Gemini API Key 含有不能用的字元（不能有空白、中文或換行），請到「設定」重新綁定");return raw;};
 const canAI=(fn,d,uk)=>!!fn&&(!!uk||d.serverAI!==false);   // 有函式，而且有玩家的 Key 或伺服器有設定 Key
 function aiError(e,uk,msg){   // 玩家的 Key 出問題要明確告訴他；其他一律當作 AI 暫時失敗
   const st=Number(/Gemini (\d{3})/.exec(e?.message||"")?.[1]||0);
