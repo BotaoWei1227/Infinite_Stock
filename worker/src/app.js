@@ -2,6 +2,7 @@ import {HttpError} from "./errors.js";
 import * as L from "./logic.js";
 import * as B from "../../public/board.js";
 import {shareUrl,parseShareHtml} from "./share.js";
+import {evaluate,wealthTitle} from "../../public/achievements.js";
 const START=50,COOLDOWN=8000,MP="market/state";
 const SEED=[["fire","火","🔥",12],["water","水","💧",10],["earth","土","🪨",8],["wind","風","🌪️",9],["steam","蒸氣","♨️",18],["thunder","雷","⚡",15]];
 const bad=m=>new HttpError(400,"invalid-argument",m);
@@ -265,7 +266,7 @@ async function inject(d,a,{stockId,item,geminiKey}={}){
     await d.db.commit([
       {path:MP,data:{stocks:{...stocks,[stockId]:{...s,last:label}}},ts:["updatedAt"],pre:m.version},
       {path:PRIV,data:{bias:{...o.data.bias,[stockId]:{v:bias,at:now}}},pre:o.version},
-      {path:pid,data:{...(p?{}:{cash:START,hold:{}}),name:p?.data.name||a.name||"玩家",lastInjectAt:now,...(dev?{}:{inv})},pre:p?p.version:null},
+      {path:pid,data:{...(p?{}:{cash:START,hold:{}}),name:p?.data.name||a.name||"玩家",lastInjectAt:now,injects:Number(p?.data.injects||0)+1,...(dev?{}:{inv})},pre:p?p.version:null},
       {path:`feed/${crypto.randomUUID()}`,data:{who,stock:s.name,item:label,element:true,rel,pass,...(dev?{dev:true}:{})},ts:["at"],pre:null},...extra]);
     // 機率只有開發者看得到：一般玩家的回應只有相關程度，不含機率與分數
     return {ok:true,price:s.price,rel,pass,lv,left:dev?0:Number(inv[name]?.n||0),...(dev?{up,score}:{inv})};
@@ -309,7 +310,7 @@ async function craft(d,a,{action,element,qty,items,url,geminiKey}={}){
       else{if(Object.keys(regDefs).length<MAX_DEFS)regDefs[g.name]=def;recent.push(g.name);extra.push({path:REGISTRY,data:{defs:regDefs,recent:recent.slice(-40)},pre:reg?reg.version:null});}
       inv[g.name]={n:Number(inv[g.name]?.n||0)+1,e:def.e,lv:def.lv};
       shares[su.code]=d.now();const keep=Object.entries(shares).sort((x,y)=>y[1]-x[1]).slice(0,200);   // 只留最近 200 個已領過的代碼
-      await d.db.commit([{path:pid,data:{...base,inv,shares:Object.fromEntries(keep),imp:{d:day,n:imp+1}},pre:p?p.version:null},...extra]);
+      await d.db.commit([{path:pid,data:{...base,inv,shares:Object.fromEntries(keep),imp:{d:day,n:imp+1},imports:Number(p?.data.imports||0)+1},pre:p?p.version:null},...extra]);
       return {ok:true,item:{name:g.name,e:def.e,lv:def.lv},sender:g.sender,inv};
     }
     if(!Array.isArray(items)||items.length!==3||items.some(x=>typeof x!=="string"||!L.validName(x)))throw bad("三物合成需要選 3 個物品");
@@ -363,9 +364,10 @@ async function trade(d,a,{stockId,dir,shares=1}={}){
     const now=d.now(),fl=await floatOf(d,o),before=Math.max(0,Number(fl[stockId]||0),Number(p?.data.hold?.[stockId]||0));
     fl[stockId]=Math.max(0,before+dir*shares,Number(r.hold[stockId]||0));   // 全服持股；至少不會少於這位玩家自己的持股
     // 買進推升、賣出壓低上漲機率（買賣壓力，看占全服持股的比例）；不直接改價格，避免買賣套利
+    const net=netOf({...(p?.data||{}),cash:r.cash,hold:r.hold},m.data.stocks,now,settingsOf(o));   // 歷史最高淨資產（財富稱號用）：每次買賣後更新
     await d.db.commit([
       {path:PRIV,data:{float:fl,bias:{...o.data.bias,[stockId]:{v:L.tradeNudge(L.effOdds(o.data.bias?.[stockId],now,0),dir,shares,before),at:now}}},pre:o.version},
-      {path:pid,data:{...(p?{}:{name:a.name||"玩家"}),cash:r.cash,hold:r.hold},pre:p?p.version:null}]);
+      {path:pid,data:{...(p?{}:{name:a.name||"玩家"}),cash:r.cash,hold:r.hold,trades:Number(p?.data.trades||0)+1,peak:Math.max(Number(p?.data.peak||0),net)},pre:p?p.version:null}]);
     return {ok:true,cash:r.cash,hold:r.hold};
   });
 }
@@ -513,6 +515,8 @@ async function setPlayerName(d,a,{name}={}){
   const path=`players/${a.uid}`;
   return retry(async()=>{const p=await d.db.get(path);await d.db.commit([{path,data:{...(p?{}:{cash:START,hold:{},name:a.name||"玩家"}),customName:name},pre:p?p.version:null}]);return {ok:true,name};});
 }
+// 淨資產：現金＋持股市值−欠款＋存款＋地產成本（mprop 是玩家文件裡記的地產價值；排行榜另外用最新的棋盤計算）
+const netOf=(p,stocks,now,cfg,prop=Number(p.mprop||0))=>Math.round((Number(p.cash||0)+Object.entries(p.hold||{}).reduce((n,[id,q])=>n+Number(q||0)*Number(stocks?.[id]?.price||0),0)-L.owed(p.loan,now,cfg.loanRate)+L.depositsValue(p,now,cfg.demRate,cfg.tdRate)+prop)*100)/100;
 async function leaderboard(d,a){
   const [players,m,o,ms]=await Promise.all([d.db.list("players"),d.db.get(MP),loadOdds(d),d.db.get(MS)]),stocks=m?.data.stocks||{},now=d.now(),cfg=settingsOf(o),mo=ms?.data.owners||{};
   return {rows:players.map(({id,data:p})=>({isMe:id===a.uid,name:p.customName||p.name||"玩家",value:Math.round((Number(p.cash||0)+Object.entries(p.hold||{}).reduce((n,[id,q])=>n+Number(q||0)*Number(stocks[id]?.price||0),0)-L.owed(p.loan,now,cfg.loanRate)+L.depositsValue(p,now,cfg.demRate,cfg.tdRate)+B.propertyValue(mo,id))*100)/100})).sort((a,b)=>b.value-a.value||a.name.localeCompare(b.name,"zh-Hant")).slice(0,100)};
@@ -561,13 +565,13 @@ async function blackmarket(d,a,{action,targetUid}={}){
     const caught=(d.secureRand?d.secureRand():d.rand())>=(action==="rob-player" ? 0.3 : 0.1);
     if(caught){
       const jailUntil=now+SENTENCE,cash=Math.round((Number(p?.data.cash??START)-fee-fine)*100)/100;
-      await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash,jailUntil,robberies:(p?.data.robberies||0)+1},pre:p?p.version:null},
+      await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash,jailUntil,robberies:(p?.data.robberies||0)+1,robJails:Number(p?.data.robJails||0)+1},pre:p?p.version:null},
         {path:`feed/${crypto.randomUUID()}`,data:{who:p?.data.customName||p?.data.name||a.name||"玩家",robbery:true,caught:true,kind:action},ts:["at"],pre:null}]);
       return {ok:true,caught:true,fine,jailUntil,fee};
     }
     if(action==="rob-bank"){
       const cash=Math.round((Number(p?.data.cash??START)-fee+BANK_LOOT)*100)/100;
-      await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash,robberies:(p?.data.robberies||0)+1},pre:p?p.version:null},
+      await d.db.commit([{path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash,robberies:(p?.data.robberies||0)+1,robWins:Number(p?.data.robWins||0)+1},pre:p?p.version:null},
         {path:`feed/${crypto.randomUUID()}`,data:{who:p?.data.customName||p?.data.name||a.name||"玩家",robbery:true,caught:false,kind:action},ts:["at"],pre:null}]);
       return {ok:true,caught:false,loot:BANK_LOOT,fee};
     }
@@ -575,19 +579,60 @@ async function blackmarket(d,a,{action,targetUid}={}){
     if(!victim)throw new HttpError(404,"not-found","找不到這位玩家");
     const stolen=Math.round(Number(victim.data.cash||0)*.3*100)/100;
     await d.db.commit([
-      {path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash:Math.round((Number(p?.data.cash??START)-fee+stolen)*100)/100,robberies:(p?.data.robberies||0)+1},pre:p?p.version:null},
+      {path:pid,data:{...(p?{}:{hold:{},name:a.name||"玩家"}),cash:Math.round((Number(p?.data.cash??START)-fee+stolen)*100)/100,robberies:(p?.data.robberies||0)+1,robWins:Number(p?.data.robWins||0)+1},pre:p?p.version:null},
       {path:victimPath,data:{cash:Math.round((Number(victim.data.cash||0)-stolen)*100)/100},pre:victim.version},
       {path:`feed/${crypto.randomUUID()}`,data:{who:p?.data.customName||p?.data.name||a.name||"玩家",robbery:true,caught:false,kind:action},ts:["at"],pre:null}]);
     return {ok:true,caught:false,stolen,fee};
   });
+}
+// ---- 個人資料與成就。成就由伺服器依玩家資料計算；歷史最高淨資產（peak）在買賣股票與打開個人資料時更新。
+const ID_ALPHABET="abcdefghjkmnpqrstuvwxyz23456789";
+const newProfileId=()=>{const b=crypto.getRandomValues(new Uint8Array(12));return [...b].map(x=>ID_ALPHABET[x%ID_ALPHABET.length]).join("");};
+function statsOf(p,uid,owners,peak){
+  const mine=Object.entries(owners||{}).filter(([,o])=>o.u===uid).map(([i])=>Number(i));
+  const sets=[...new Set(B.BOARD.filter(t=>t.type==="prop").map(t=>t.group))].filter(g=>B.groupTiles(g).every(i=>owners?.[i]?.u===uid)).length;
+  return {peak,trades:Number(p.trades||0),injects:Number(p.injects||0),crafts:Number(p.crafts||0),recipes:Object.keys(p.recipes||{}).length,imports:Number(p.imports||0),mrolls:Number(p.mrolls||0),props:mine.length,sets,bankrupt:Number(p.bankrupt||0),bails:Number(p.bails||0),robWins:Number(p.robWins||0),robJails:Number(p.robJails||0)};
+}
+const displayName=(p,a)=>p?.customName||p?.name||a?.name||"玩家";
+async function achievements(d,a,{action="get",on,bio}={}){
+  if(!["get","share"].includes(action))throw bad("參數錯誤");
+  const pid=`players/${a.uid}`;
+  return retry(async()=>{
+    const [p,m,o,ms]=await Promise.all([d.db.get(pid),d.db.get(MP),loadOdds(d),d.db.get(MS)]);
+    const pd=p?.data||{cash:START,hold:{}},owners=ms?.data.owners||{},now=d.now();
+    const net=netOf(pd,m?.data.stocks,now,settingsOf(o),B.propertyValue(owners,a.uid)),peak=Math.max(Number(pd.peak||0),net);
+    const prof={on:false,id:null,bio:"",...(pd.profile||{})},data={};
+    if(peak>Number(pd.peak||0))data.peak=peak;
+    const ops=[];
+    if(action==="share"){
+      if(typeof on!=="boolean")throw bad("參數錯誤");
+      if(bio!==undefined){if(typeof bio!=="string"||[...bio].length>60||/[\u0000-\u001f]/.test(bio))throw bad("個人簡介最多 60 字，不能有控制字元");prof.bio=bio.trim();}
+      if(on&&!prof.id){prof.id=newProfileId();ops.push({path:`profileIds/${prof.id}`,data:{uid:a.uid},pre:null});}
+      prof.on=on;data.profile=prof;
+    }
+    if(Object.keys(data).length)await d.db.commit([{path:pid,data:{...(p?{}:{name:a.name||"玩家",cash:START,hold:{}}),...data},pre:p?p.version:null},...ops]);
+    const stats=statsOf(pd,a.uid,owners,peak),list=evaluate(stats),wt=wealthTitle(peak);
+    return {ok:true,name:displayName(pd,a),title:wt.current?.name||null,titleIcon:wt.current?.icon||null,next:wt.next,stats,achievements:list,unlocked:list.filter(x=>x.unlocked).length,total:list.length,share:{on:prof.on,id:prof.id,bio:prof.bio}};
+  });
+}
+// 公開的個人資料頁（不用登入）：只回傳玩家自己選擇公開的內容，不含 uid、信箱、現金等
+async function publicProfile(d,{id}={}){
+  if(!/^[a-z0-9]{8,20}$/.test(typeof id==="string"?id:""))throw new HttpError(404,"not-found","找不到這個個人資料頁");
+  const pi=await d.db.get(`profileIds/${id}`);if(!pi)throw new HttpError(404,"not-found","找不到這個個人資料頁");
+  const [p,m,o,ms]=await Promise.all([d.db.get(`players/${pi.data.uid}`),d.db.get(MP),loadOdds(d),d.db.get(MS)]);
+  if(!p||!p.data.profile?.on||p.data.profile.id!==id)throw new HttpError(404,"not-found","這個個人資料頁沒有公開");
+  const pd=p.data,owners=ms?.data.owners||{},now=d.now(),peak=Math.max(Number(pd.peak||0),netOf(pd,m?.data.stocks,now,settingsOf(o),B.propertyValue(owners,pi.data.uid)));
+  const stats=statsOf(pd,pi.data.uid,owners,peak),list=evaluate(stats),wt=wealthTitle(peak),got=list.filter(x=>x.unlocked);
+  return {name:displayName(pd),bio:pd.profile.bio||"",title:wt.current?.name||null,titleIcon:wt.current?.icon||null,peak:Math.round(peak),stats,achievements:got.map(({id,name,icon,desc,kind})=>({id,name,icon,desc,kind})),unlocked:got.length,total:list.length};
 }
 export async function route(req,env,d){
   if(req.method==="OPTIONS")return new Response(null,{status:204,headers:cors(env)});
   const path=new URL(req.url).pathname;
   try{
     if(req.method!=="POST")throw new HttpError(405,"invalid-argument","方法不允許");
+    if(path==="/public"){let b={};try{b=await req.json();}catch{}return out(env,200,await publicProfile(d,b));}   // 公開的個人資料頁，不用登入
     if(path==="/ensure-market")return out(env,200,await ensureMarket(d));
-    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"||path==="/profile"||path==="/leaderboard"||path==="/blackmarket"||path==="/analyst"||path==="/admin-settings"||path==="/monopoly"||path==="/craft"){
+    if(path==="/inject"||path==="/trade"||path==="/bank"||path==="/news"||path==="/whoami"||path==="/odds"||path==="/profile"||path==="/leaderboard"||path==="/blackmarket"||path==="/analyst"||path==="/admin-settings"||path==="/monopoly"||path==="/craft"||path==="/achievements"){
       const a=await d.verify(req);
       if(a.provider!=="google.com")throw new HttpError(401,"unauthenticated","請先以 Google 帳號登入");
       if(path==="/whoami"){await ensureMarket(d);const o=await loadOdds(d);return out(env,200,{dev:isDev(d,a),settings:settingsOf(o)});}
@@ -604,8 +649,8 @@ export async function route(req,env,d){
       }
       if((path==="/trade"||path==="/inject")&&!marketOpen(d.now()))throw new HttpError(409,"market-closed","休市中，交易時間為台北時間 09:00–24:00");
       let body;try{body=await req.json();}catch{throw bad("請求格式錯誤");}
-      if(path!=="/leaderboard"&&path!=="/blackmarket"&&!(path==="/bank"&&body.action==="bail"))assertFree(await d.db.get(`players/${a.uid}`),d.now());
-      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:path==="/profile"?setPlayerName:path==="/blackmarket"?blackmarket:path==="/analyst"?analyst:path==="/monopoly"?monopoly:path==="/craft"?craft:trade)(d,a,body));
+      if(path!=="/leaderboard"&&path!=="/blackmarket"&&path!=="/achievements"&&!(path==="/bank"&&body.action==="bail"))assertFree(await d.db.get(`players/${a.uid}`),d.now());
+      return out(env,200,await (path==="/inject"?inject:path==="/bank"?bank:path==="/news"?news:path==="/profile"?setPlayerName:path==="/blackmarket"?blackmarket:path==="/analyst"?analyst:path==="/monopoly"?monopoly:path==="/craft"?craft:path==="/achievements"?achievements:trade)(d,a,body));
     }
     throw new HttpError(404,"not-found","找不到");
   }catch(e){

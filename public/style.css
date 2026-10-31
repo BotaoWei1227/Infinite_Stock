@@ -987,3 +987,22 @@ button.echip:disabled{opacity:.45;cursor:default;}
 .sage{margin:6px 0;padding:6px 10px;border-left:3px solid var(--mag);background:#0b1220;color:var(--amber);font-size:14px;}
 .link-in{width:100%;max-width:100%;}
 a.px-btn{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;}
+
+/* 個人資料與成就 */
+.pf-card{border:2px solid var(--line);background:#0b1220;padding:12px;margin-bottom:10px;}
+.pf-head{display:flex;gap:12px;align-items:center;margin-bottom:6px;}
+.pf-badge{font-size:44px;line-height:1;width:64px;height:64px;display:grid;place-items:center;border:2px solid var(--amber);background:#1a2332;flex:none;}
+.pf-title{font-size:20px;font-weight:700;color:var(--amber);}
+.pf-name{font-size:16px;}
+.pf-bio{margin-top:2px;color:var(--cyan);font-size:14px;}
+.pf-next{margin-top:8px;}
+.pf-bar{height:12px;border:2px solid var(--line);background:#0b1220;margin-top:4px;}
+.pf-bar i{display:block;height:100%;background:var(--amber);}
+.pf-stats{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:6px;margin:8px 0;}
+.pf-stat{border:1px solid var(--line);padding:6px 8px;background:#0b1220;display:flex;flex-direction:column;}
+.pf-stat b{font-size:18px;color:var(--cyan);}
+.pf-list{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:6px;}
+.pf-ach{display:flex;gap:10px;align-items:center;border:2px solid var(--line);padding:8px;background:#0b1220;}
+.pf-ach.lock{opacity:.55;border-style:dashed;}
+.pf-ico{font-size:26px;width:36px;text-align:center;flex:none;}
+textarea.px-in{width:100%;resize:vertical;}

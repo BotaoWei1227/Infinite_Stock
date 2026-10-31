@@ -3,6 +3,7 @@ import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase
 import {getAuth,onAuthStateChanged,GoogleAuthProvider,signInWithPopup,signInWithRedirect,getRedirectResult,signOut} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
 import {createMono} from "./mono.js";
 import {normInv,BASE_ITEMS} from "./items.js";
+import {zhBig,profileHead,statGrid,achievementList} from "./profile.js";
 import {getFirestore,initializeFirestore,getDoc,collection,doc,onSnapshot,query,orderBy,limit} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
 
 const $=id=>document.getElementById(id),S=sessionStorage;
@@ -448,6 +449,62 @@ function renderWork(){
   rb.append(el("p",{class:"mu",text:`投入股票的效果：看物品和股票的相關度（AI 判定），再乘上品階的力道（品階 0 是一半，1 是滿額）。每次投入都有幾秒冷卻，總偏移有上限，而且會慢慢消退。`}));
   book.append(rb);v.append(book);
 }
+// ---------- 個人資料與成就（自己的）／公開分享頁 ----------
+let meProfile=null,meLoading=false,meErr="",pubId="",pubData=null,pubErr="",pubLoading=false,bioDraft=null;
+async function loadMe(force=false){
+  if(!user||meLoading||(meProfile&&!force))return;
+  meLoading=true;meErr="";
+  try{await act("achievements",{action:"get"},j=>{meProfile=j;});if(!meProfile)meErr="讀取失敗，請稍後再試";}catch{meErr="讀取失敗，請稍後再試";}
+  meLoading=false;render();
+}
+const profileUrl=id=>`${location.origin}${location.pathname}#u=${id}`;
+async function copyText(t){try{await navigator.clipboard.writeText(t);say("已複製連結");}catch{prompt("複製這個連結：",t);}}
+function renderMe(){
+  const v=$("v-me");v.replaceChildren();
+  if(!user){v.append(el("p",{class:"mu",text:"請先以 Google 帳號登入，就能看到自己的個人資料與成就。"}));return;}
+  if(!meProfile){v.append(el("p",{class:"mu",text:meErr||"讀取中…"}));if(!meLoading&&!meErr)loadMe();return;}
+  const d=meProfile,card=el("section",{class:"win","aria-label":"我的個人資料"});card.append(winBar("👤 PROFILE.EXE"));
+  const b=el("div",{class:"body"});b.append(profileHead(el,d,d.stats.peak),statGrid(el,d.stats));card.append(b);v.append(card);
+  // 分享
+  const sh=el("section",{class:"win","aria-label":"分享個人資料"});sh.append(winBar("🔗 SHARE.EXE"));
+  const sb=el("div",{class:"body"}),bio=el("textarea",{class:"px-in",rows:"2",maxlength:"60",placeholder:"個人簡介（最多 60 字，選填）","aria-label":"個人簡介",oninput:e=>{bioDraft=e.target.value;}});bio.value=bioDraft??d.share.bio??"";
+  sb.append(el("p",{class:"mu",text:"開啟後會產生一個連結，任何人（不用登入）都能看到你的稱號、名稱、簡介、歷史最高淨資產、成就與統計。看不到你的現金、持股、信箱等私人資料。可以隨時關閉。"}),bio);
+  const save=on=>async()=>{const r=await act("achievements",{action:"share",on,bio:bio.value.trim()},j=>{meProfile=j;});if(r){bioDraft=null;say(on?"已開啟公開頁面":"已關閉公開頁面");}};
+  sb.append(el("div",{class:"row"},d.share.on?el("button",{class:"px-btn pri",type:"button",disabled:busy,text:"儲存簡介",onclick:save(true)}):el("button",{class:"px-btn pri",type:"button",disabled:busy,text:"🔗 開啟公開頁面",onclick:save(true)}),d.share.on?el("button",{class:"px-btn",type:"button",disabled:busy,text:"關閉公開",onclick:save(false)}):null));
+  if(d.share.on&&d.share.id){
+    const url=profileUrl(d.share.id);
+    sb.append(el("input",{class:"px-in link-in",readonly:"",value:url,"aria-label":"公開連結",onfocus:e=>e.target.select()}),
+      el("div",{class:"row"},el("button",{class:"px-btn pri",type:"button",text:"📋 複製連結",onclick:()=>copyText(url)}),
+        navigator.share?el("button",{class:"px-btn",type:"button",text:"📤 分享",onclick:()=>navigator.share({title:`${d.name} 的練金交易所個人資料`,text:`${d.title||"平民"}・${d.name}`,url}).catch(()=>{})}):null,
+        el("a",{class:"px-btn",href:url,target:"_blank",rel:"noopener noreferrer",text:"預覽"})));
+  }
+  sh.append(sb);v.append(sh);
+  // 成就
+  const ac=el("section",{class:"win","aria-label":"成就"});ac.append(winBar("🏅 ACHIEVEMENTS.EXE"));
+  ac.append(el("div",{class:"body"},...achievementList(el,d.achievements,{locked:true})));v.append(ac);
+  v.append(el("div",{class:"row"},el("button",{class:"px-btn",type:"button",disabled:busy,text:"🔄 重新整理",onclick:()=>{meProfile=null;loadMe(true);}})));
+}
+async function loadPub(){
+  if(pubLoading||!pubId)return;pubLoading=true;pubErr="";pubData=null;render();
+  try{
+    const r=await fetch(CFG.api+"/public",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({id:pubId})});
+    const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error?.message||"找不到這個個人資料頁");pubData=j;
+  }catch(e){pubErr=e.message||"讀取失敗";}
+  pubLoading=false;render();
+}
+function renderPub(){
+  const v=$("v-pub");v.replaceChildren();
+  const home=el("div",{class:"row"},el("button",{class:"px-btn pri",type:"button",text:"🎮 進入練金交易所",onclick:()=>{pubId="";pubData=null;setView("trade");}}));
+  if(pubErr){v.append(el("p",{class:"hot",text:pubErr}),home);return;}
+  if(!pubData){v.append(el("p",{class:"mu",text:"讀取中…"}));return;}
+  const d=pubData,card=el("section",{class:"win","aria-label":`${d.name} 的個人資料`});card.append(winBar("👤 PROFILE.EXE"));
+  card.append(el("div",{class:"body"},profileHead(el,d,d.peak),statGrid(el,d.stats)));v.append(card);
+  const ac=el("section",{class:"win","aria-label":"成就"});ac.append(winBar("🏅 ACHIEVEMENTS.EXE"));
+  ac.append(el("div",{class:"body"},...achievementList(el,d.achievements.map(a=>({...a,unlocked:true})))));v.append(ac);
+  v.append(el("div",{class:"row"},el("button",{class:"px-btn",type:"button",text:"📋 複製這個連結",onclick:()=>copyText(profileUrl(pubId))})),home);
+}
+// 設定頁之前的小工具：從網址 #u=代碼 判斷是不是公開個人資料頁
+const pubFromHash=()=>{const m=/^#u=([a-z0-9]{8,20})$/.exec(location.hash);return m?m[1]:"";};
 // ---------- 設定（介面大小） ----------
 const RULE_TEXT="股價會自己隨機漲跌。到「練金工坊」買基礎元素（火、水、土、風，各 10 元），再把三個物品合成：AI 煉金師會憑聯想創造出新物品（溫泉、彩虹、火山…）。回到這裡選一個物品投入任何一檔股票：AI 會判斷它和這檔股票有多相關，越相關上漲機率提高越多，不相關反而會壓低；品階越高力道越大，效果會慢慢消退，每個物品只能用一次。買進會推升、賣出會壓低上漲機率，像真實市場的買賣壓力：影響大小看你買賣的股數占全服持股的比例，賣掉大部分持股會重創，買賣 1 股幾乎沒有影響。";
 const SCALES={s:["小",.9],m:["中",1],l:["大",1.2]};
@@ -482,7 +539,7 @@ function renderSet(){
   v.append(w);
 }
 // ---------- 分頁 ----------
-const VIEWS={mono:"v-mono",trade:"v-trade",rank:"v-rank",black:"v-black",analyst:"v-analyst",news:"v-news",bank:"v-bank",work:"v-work",set:"v-set"},HASH={mono:"#mono",trade:"",rank:"#rank",black:"#black",analyst:"#analyst",news:"#news",bank:"#bank",work:"#work",set:"#settings"};
+const VIEWS={mono:"v-mono",trade:"v-trade",rank:"v-rank",black:"v-black",analyst:"v-analyst",news:"v-news",bank:"v-bank",work:"v-work",me:"v-me",pub:"v-pub",set:"v-set"},HASH={mono:"#mono",trade:"",rank:"#rank",black:"#black",analyst:"#analyst",news:"#news",bank:"#bank",work:"#work",me:"#me",set:"#settings"};
 // 大富翁：只在進入大富翁畫面時才訂閱棋盤文件（省 Firestore 讀取額度）
 let offMono=null;const mono=createMono({host:$("v-mono"),el,fmt,say,act,getMe:()=>me,getUser:()=>user,isBusy:()=>busy});
 function monoSub(on){
@@ -496,7 +553,7 @@ function setView(v){
   for(const [k,id] of Object.entries(VIEWS))$(id).hidden=k!==v;
   $("mode").textContent=v==="mono"?"📈":"🎲";$("mode").setAttribute("aria-label",v==="mono"?"回到股市":"切換到大富翁");monoSub(v==="mono");
   document.querySelectorAll(".nav-item").forEach(b=>{if(b.dataset.v===v)b.setAttribute("aria-current","page");else b.removeAttribute("aria-current");});
-  try{history.replaceState(null,"",location.pathname+location.search+HASH[v]);}catch{}
+  try{history.replaceState(null,"",location.pathname+location.search+(v==="pub"?`#u=${pubId}`:HASH[v]));}catch{}
   render();window.scrollTo(0,0);
 }
 function render(){
@@ -516,6 +573,8 @@ function render(){
   else if(view==="news")renderNews();
   else if(view==="bank")updateBank();
   else if(view==="work")renderWork();
+  else if(view==="me")renderMe();
+  else if(view==="pub")renderPub();
   else renderSet();
 }
 async function renderRank(){
@@ -595,14 +654,17 @@ function wireSettings(){
 // ---------- 啟動 ----------
 async function main(){
   applyScale();wireSettings();wireNav();marketOpenPrev=marketOpenClient();
-  setView({"#mono":"mono","#news":"news","#rank":"rank","#black":"black","#analyst":"analyst","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
+  pubId=pubFromHash();
+  addEventListener("hashchange",()=>{const id=pubFromHash();if(id&&id!==pubId){pubId=id;pubData=null;setView("pub");loadPub();}});
+  setView(pubId?"pub":{"#me":"me","#mono":"mono","#news":"news","#rank":"rank","#black":"black","#analyst":"analyst","#bank":"bank","#work":"work","#settings":"set"}[location.hash]||"trade");
+  if(pubId)loadPub();
   if([CFG.firebase.apiKey,CFG.api].some(v=>/REPLACE_ME/.test(v))){say("請先在 config.js 填入 Firebase 與 Worker 網址");return;}
   const app=initializeApp(CFG.firebase);
   // 手機網路常讓 Firestore 的即時連線卡住；自動偵測並改用長輪詢，更新才不會漏掉
   try{db=initializeFirestore(app,{experimentalAutoDetectLongPolling:true});}catch{db=getFirestore(app);}if(view==="mono")monoSub(true);
   auth=getAuth(app);getRedirectResult(auth).catch(e=>say("Google 登入失敗："+e.code));
   onAuthStateChanged(auth,u=>{
-    user=u;isDev=false;craftSig="";analystReport=null;analystStock="";offP&&offP();offP=null;
+    user=u;isDev=false;craftSig="";analystReport=null;analystStock="";meProfile=null;meErr="";bioDraft=null;offP&&offP();offP=null;
     if(u)u.getIdToken().then(t=>fetch(CFG.api+"/whoami",{method:"POST",headers:{Authorization:"Bearer "+t}})).then(r=>r.json()).then(j=>{isDev=!!j.dev;gameSettings={...gameSettings,...j.settings};craftSig="";bankBuilt=false;render();if(isDev)fetchOdds();}).catch(()=>{});
     if(u)offP=onSnapshot(doc(db,"players",u.uid),snap=>{me=snap.exists()?{...snap.data()}:{cash:CFG.startCash,hold:{},name:u.displayName||"玩家"};render();checkMob();});
     else me={cash:CFG.startCash,hold:{},name:"訪客"};

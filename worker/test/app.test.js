@@ -71,7 +71,7 @@ test("冷卻 8 秒",async()=>{
 test("買賣與銀行只需要 Google 登入",async()=>{
   const {call,db}=mk();await call("/ensure-market");
   for(let i=0;i<4;i++)assert.equal((await call("/trade",TR())).status,200);
-  assert.deepEqual(P(db),{name:"Botao",cash:2,hold:{fire:4}});
+  assert.deepEqual(P(db),{name:"Botao",cash:2,hold:{fire:4},trades:4,peak:50});   // 買賣次數與歷史最高淨資產（50）
   assert.equal((await call("/trade",TR())).status,409);
   assert.equal((await call("/trade",TR({stockId:"water",dir:-1}))).status,409);
   assert.equal((await call("/bank",BK({action:"borrow",amount:10}))).status,200);
@@ -844,4 +844,81 @@ test("動作回應帶最新背包：買、合成、領取、投入都回傳 inv�
   await CR(x,{action:"buy",element:"fire",qty:1});                                                                                   // 湊成 3 個火
   const c=await CR(x,{action:"craft",items:["火","火","火"]});assert.equal(c.status,503);                                             // AI 給了保留名稱 → 視為壞資料，不扣材料
   assert.equal(P(x.db).inv.火.n,3);
+});
+
+// ================= 個人資料頁與成就 =================
+import {evaluate,wealthTitle,WEALTH,ACHIEVEMENTS} from "../../public/achievements.js";
+const AC=(x,body={})=>x.call("/achievements",{action:"get",...body});
+const PUBP=(x,id)=>x.call("/public",{id});
+test("成就定義：財富稱號依歷史最高淨資產（萬億＝10^12、兆＝10^16）；進度與解鎖；id 不重複",()=>{
+  assert.equal(wealthTitle(0).current,null);assert.equal(wealthTitle(0).next.name,"千元戶");
+  assert.equal(wealthTitle(999).current,null);assert.equal(wealthTitle(1e3).current.name,"千元戶");assert.equal(wealthTitle(1e6).current.name,"百萬富翁");
+  assert.equal(wealthTitle(1e12).current.name,"萬億富翁");assert.equal(wealthTitle(9.9e15).current.name,"千萬億富翁");assert.equal(wealthTitle(1e16).current.name,"兆富翁");assert.equal(wealthTitle(1e18).next,null);
+  assert.ok(WEALTH.every((w,i)=>i===0||w.min>WEALTH[i-1].min));
+  const l=evaluate({peak:2e6,trades:60,crafts:0});const by=Object.fromEntries(l.map(x=>[x.id,x]));
+  assert.equal(by.wealth3.unlocked,true);assert.equal(by.wealth4.unlocked,false);assert.equal(by.wealth4.progress,2e6);
+  assert.equal(by.trade50.unlocked,true);assert.equal(by.trade500.unlocked,false);assert.equal(by.trade500.progress,60);assert.equal(by.craft1.unlocked,false);
+  assert.equal(new Set(l.map(x=>x.id)).size,l.length);assert.equal(l.length,WEALTH.length+ACHIEVEMENTS.length);
+  assert.equal(evaluate().every(x=>!x.unlocked),true);assert.equal(evaluate({peak:"abc",trades:NaN}).filter(x=>x.unlocked).length,0);
+});
+test("成就：買賣、投入、合成、領取、搶劫、大富翁等行為都會累計；歷史最高淨資產只增不減；稱號跟著升級",async()=>{
+  const x=mk({fetchShare:async()=>GOOD});x.t.v=Date.UTC(2026,9,30,12,0);await x.call("/ensure-market");seed(x.db,"g1",{cash:2e6,hold:{}});
+  let r=await AC(x);assert.equal(r.status,200);assert.equal(r.body.title,"百萬富翁");assert.equal(r.body.titleIcon,"💰");assert.equal(r.body.next.name,"千萬富翁");assert.equal(r.body.stats.peak,2e6);
+  const ids=()=>r.body.achievements.filter(a=>a.unlocked).map(a=>a.id);
+  assert.ok(ids().includes("wealth3")&&!ids().includes("trade1"));
+  await x.call("/trade",TR());await x.call("/trade",TR({dir:-1}));
+  await CR(x,{action:"buy",element:"fire",qty:3});await CR(x,{action:"craft",items:["火","火","火"]});
+  await CR(x,{action:"import",url:URL1});x.state.noSeed=true;x.t.v+=9000;await x.call("/inject",{stockId:"fire",item:"火"});
+  r=await AC(x);assert.deepEqual([r.body.stats.trades,r.body.stats.injects,r.body.stats.crafts,r.body.stats.imports,r.body.stats.recipes],[2,1,1,1,1]);
+  for(const k of ["trade1","inject1","craft1","gift1","wealth0","wealth3"])assert.ok(ids().includes(k),k);assert.ok(!ids().includes("wealth5"));
+  assert.equal(r.body.unlocked,ids().length);assert.equal(r.body.total,WEALTH.length+ACHIEVEMENTS.length);
+  // 現金暴跌後，歷史最高仍然保留、稱號不會掉
+  x.db.m.get("players/g1").data.cash=10;r=await AC(x);assert.equal(r.body.stats.peak>=2e6,true);assert.equal(r.body.title,"百萬富翁");
+  // 突破之後稱號升級
+  x.db.m.get("players/g1").data.cash=3e8;r=await AC(x);assert.equal(r.body.title,"億萬富翁");
+  // 搶劫成功／失敗各自累計
+  const rob=mk({rand:()=>.0});await rob.call("/ensure-market");seed(rob.db,"g1",{cash:100000});
+  await rob.call("/blackmarket",{action:"rob-bank"});assert.equal(P(rob.db).robWins,1);assert.equal(P(rob.db).robJails??0,0);
+  const jail=mk({rand:()=>.99});await jail.call("/ensure-market");seed(jail.db,"g1",{cash:100000});
+  await jail.call("/blackmarket",{action:"rob-bank"});assert.equal(P(jail.db).robJails,1);
+  // 服刑中也能看個人資料
+  assert.equal((await AC(jail)).status,200);
+});
+test("大富翁相關成就：持有地產數與湊齊一整組同色地產",async()=>{
+  const x=mk();await x.call("/ensure-market");seed(x.db,"g1",{cash:100});
+  const g0=B.groupTiles(0);const owners={};for(const i of g0)owners[i]={u:"g1",n:"Botao",lv:0};owners[B.groupTiles(1)[0]]={u:"g1",n:"Botao",lv:0};owners[B.groupTiles(2)[0]]={u:"g2",n:"路人",lv:0};
+  x.db.m.set("monopoly/state",{v:"m0",data:{owners,pos:{},log:[]}});
+  const r=await AC(x);assert.equal(r.body.stats.props,5);assert.equal(r.body.stats.sets,1);
+  const ok=r.body.achievements.filter(a=>a.unlocked).map(a=>a.id);assert.ok(ok.includes("prop1")&&ok.includes("set1")&&!ok.includes("prop8")&&!ok.includes("set3"));
+});
+test("分享個人資料頁：開啟後產生連結代碼；不用登入就能看；只含公開內容；關閉後看不到；簡介有長度限制",async()=>{
+  const x=mk();await x.call("/ensure-market");seed(x.db,"g1",{cash:5e5,hold:{},customName:"小明",trades:60,crafts:3,jailUntil:0});
+  assert.equal((await PUBP(x,"abcdefghijkl")).status,404);                                            // 沒有這個代碼
+  let s=await AC(x,{action:"share",on:true,bio:"  我是煉金新手  "});assert.equal(s.status,200);assert.equal(s.body.share.on,true);assert.equal(s.body.share.bio,"我是煉金新手");
+  const id=s.body.share.id;assert.match(id,/^[a-z2-9]{12}$/);assert.deepEqual(x.db.m.get(`profileIds/${id}`).data,{uid:"g1"});
+  x.state.uid="stranger";                                                                             // 換成另一個人（也不需要登入，下面再測沒有驗證的請求）
+  const pub=await PUBP(x,id);assert.equal(pub.status,200);
+  assert.equal(pub.body.name,"小明");assert.equal(pub.body.bio,"我是煉金新手");assert.equal(pub.body.title,"十萬富翁");assert.equal(pub.body.peak,5e5);
+  assert.ok(pub.body.achievements.some(a=>a.id==="trade50")&&pub.body.achievements.every(a=>a.id&&a.name&&a.icon&&a.desc&&!("progress" in a)));
+  assert.equal(pub.body.unlocked,pub.body.achievements.length);
+  const text=JSON.stringify(pub.body);for(const secret of ["g1","cash","jailUntil","email","uid","player@example.com"])assert.equal(text.includes(secret),false,secret);   // 沒有任何私人資料
+  // 沒有登入（x.d.verify 會丟錯）也能看公開頁
+  const anon=mk({verify:async()=>{throw new HttpError(401,"unauthenticated","x");}});anon.db=x.db;anon.d.db=x.db;
+  assert.equal((await anon.call("/public",{id})).status,200);assert.equal((await anon.call("/achievements",{action:"get"})).status,401);
+  // 關閉 → 404；再開啟用同一個代碼
+  x.state.uid="g1";s=await AC(x,{action:"share",on:false});assert.equal(s.body.share.on,false);assert.equal(s.body.share.id,id);
+  assert.equal((await PUBP(x,id)).status,404);
+  s=await AC(x,{action:"share",on:true});assert.equal(s.body.share.id,id);assert.equal((await PUBP(x,id)).status,200);
+  // 格式與長度
+  for(const bad of [{on:"yes"},{on:true,bio:"長".repeat(61)},{on:true,bio:5},{on:true,bio:"換\n行"},{}])assert.equal((await AC(x,{action:"share",...bad})).status,400);
+  assert.equal((await AC(x,{action:"share",on:true,bio:"長".repeat(60)})).status,200);
+  assert.equal((await AC(x,{action:"dance"})).status,400);
+  for(const bad of [undefined,"",null,5,"ABC","a b","../x","a".repeat(21),"abc"])assert.equal((await PUBP(x,bad)).status,404);
+});
+test("個人資料頁：代碼被別人的資料對不上時不會洩漏；刪掉玩家資料後 404",async()=>{
+  const x=mk();await x.call("/ensure-market");seed(x.db,"g1",{cash:100,hold:{}});
+  const id=(await AC(x,{action:"share",on:true})).body.share.id;
+  x.db.m.get("players/g1").data.profile.id="otherotherid";assert.equal((await PUBP(x,id)).status,404);   // 代碼對不上
+  x.db.m.get("players/g1").data.profile.id=id;assert.equal((await PUBP(x,id)).status,200);
+  x.db.m.delete("players/g1");assert.equal((await PUBP(x,id)).status,404);
 });
